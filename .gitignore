@@ -225,3 +225,4 @@ compile_commands.json
 .vscode/
 *.nsys-rep
 *.ncu-rep
+*.gguf
