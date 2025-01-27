@@ -231,3 +231,4 @@ compile_commands.json
 # Profiling data
 *.nsys-rep
 *.ncu-rep
+*.gguf
