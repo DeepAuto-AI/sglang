@@ -73,16 +73,28 @@ class HiPMetadataCachePool:
                 layer_config = hip_config.layers[layer_idx]
             self.layer_configs[layer_idx] = layer_config
 
-            if os.getenv("HIP_DEBUG_SNAP_KV", "0") == "1":
-                n_chunks = triton.cdiv(
-                    layer_config.second_stage_k + 2048,
-                    layer_config.stages[-1].stage_chunk_size,
+            additional_tokens = 0
+            # if os.getenv("HIP_DEBUG_SNAP_KV", "0") == "1":
+            #     additional_tokens += 8192
+            if os.getenv("HIP_DIAG_INFO", None) != None:
+                additional_tokens += 4096 if require_dense else 4096
+            if os.getenv("HIP_DEBUG_ADD_DELAY_WINDOW", "0") == "1":
+                additional_tokens += layer_config.second_stage_k * (
+                    64 // layer_config.stages[-1].stage_chunk_size
                 )
-            else:
-                n_chunks = triton.cdiv(
-                    layer_config.second_stage_k,
-                    layer_config.stages[-1].stage_chunk_size,
+            # if (os.getenv('HIP_DEBUG_IMPORTANT_K', '0') == '1'):
+            #     additional_tokens += 8192
+
+            actual_tokens = layer_config.second_stage_k + additional_tokens
+            if actual_tokens != layer_config.second_stage_k:
+                print(
+                    f"actual attened tokens are {actual_tokens + layer_config.sliding_window_size + layer_config.sink_token_size}"
                 )
+
+            n_chunks = triton.cdiv(
+                actual_tokens,
+                layer_config.stages[-1].stage_chunk_size,
+            )
 
             num_q_blocks = 1
             self.init_buffer(

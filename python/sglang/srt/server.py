@@ -26,6 +26,7 @@ import os
 import signal
 import threading
 import time
+import warnings
 from http import HTTPStatus
 from typing import AsyncIterator, Dict, List, Optional, Tuple, Union
 
@@ -713,36 +714,44 @@ def _wait_and_warmup(server_args, pipe_finish_writer, image_token_text):
     else:
         # json_data["text"] = "The capital city of France is"
         target_length = int(os.getenv("SRT_WARMUP_PASSKEY_LENGTH", "35000"))
-        json_data["text"] = (
-            "You need to find the passkey. Read carefully following text, and remember the passkey\n\n"
-        )
-        filler = "Sky is blue, grass is green, sun is red. And here we go again"
-        json_data["text"] += filler * (target_length // 35)
-        json_data[
-            "text"
-        ] += "\n\nThe passkey is $000310$. Remember, the passkey is $000310$.\n\n"
-        json_data[
-            "text"
-        ] += "\n\nThe passkey is $000310$. Remember, the passkey is $000310$.\n\n"
-        json_data[
-            "text"
-        ] += "\n\nThe passkey is $000310$. Remember, the passkey is $000310$.\n\n"
-        json_data["text"] += filler * (target_length // 35)
-        json_data["text"] += "What was the passkey? The passkey is"
+        if target_length > 0:
+            json_data["text"] = (
+                "You need to find the passkey. Read carefully following text, and remember the passkey\n\n"
+            )
+            filler = "Sky is blue, grass is green, sun is red. And here we go again"
+            json_data["text"] += filler * (target_length // 35)
+            json_data[
+                "text"
+            ] += "\n\nThe passkey is $000310$. Remember, the passkey is $000310$.\n\n"
+            json_data[
+                "text"
+            ] += "\n\nThe passkey is $000310$. Remember, the passkey is $000310$.\n\n"
+            json_data[
+                "text"
+            ] += "\n\nThe passkey is $000310$. Remember, the passkey is $000310$.\n\n"
+            json_data["text"] += filler * (target_length // 35)
+            json_data["text"] += "What was the passkey? The passkey is"
+        else:
+            json_data["text"] = None
 
     try:
-        for _ in range(server_args.dp_size):
-            res = requests.post(
-                url + request_name,
-                json=json_data,
-                headers=headers,
-                timeout=3600,
+        if json_data["text"] is None:
+            warnings.warn(
+                "Warmup is skipped, therefore JIT will happend during serving."
             )
-            assert res.status_code == 200, f"{res}"
-            logger.info(f"Warmup response: {res.json()}")
-            if os.getenv("SRT_EXIT_AFTER_WARMUP", "0") == "1":
-                logger.error(f"Initialization canceled. SRT_EXIT_AFTER_WARMUP")
-                kill_process_tree(os.getpid())
+        else:
+            for _ in range(server_args.dp_size):
+                res = requests.post(
+                    url + request_name,
+                    json=json_data,
+                    headers=headers,
+                    timeout=3600,
+                )
+                assert res.status_code == 200, f"{res}"
+                logger.info(f"Warmup response: {res.json()}")
+                if os.getenv("SRT_EXIT_AFTER_WARMUP", "0") == "1":
+                    logger.error(f"Initialization canceled. SRT_EXIT_AFTER_WARMUP")
+                    kill_process_tree(os.getpid())
     except Exception:
         last_traceback = get_exception_traceback()
         if pipe_finish_writer is not None:
