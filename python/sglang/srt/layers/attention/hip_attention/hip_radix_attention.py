@@ -843,7 +843,7 @@ online_update={online_update}
             context = context.to(query.dtype)
             context = context[:, -query.shape[1] :, :, :].contiguous()
         else:
-            if layer.layer_id < 160:
+            if True:
                 assert query_for_mask is None
                 position_ids = args.position_ids
                 args.position_ids = position_ids[:, :-last_dense]
@@ -943,7 +943,7 @@ online_update={online_update}
                 # dense_indices = dense_indices // block_size_q * block_size_q
                 # dense_indices = (dense_indices[::block_size_q, None] + torch.arange(0, block_size_q, device=query.device)[None, :]).view(-1)[:dense_indices.shape[-1]]
                 # dense_indices = scores.shape[-1] - dense_indices - 1
-                print("b", dense_indices[::block_size_q], query.shape)
+                # print("b", dense_indices[::block_size_q], query.shape)
                 sparse_indices = torch.arange(0, scores.shape[-1], device=query.device)
                 sparse_indices.scatter_(dim=0, index=dense_indices, value=987654321)
                 sparse_indices, _ = sparse_indices.sort()
