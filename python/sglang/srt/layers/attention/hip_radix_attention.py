@@ -73,7 +73,7 @@ class HiPRadixAttentionBackend(AttentionBackend):
                     layer_config = self.hip_config.layers[layer_id]
                 exclude_window_size = layer_config.sliding_window_size // 2
                 diag_sliding_window_range = 131072
-                diag_sliding_window_size = 4096 if require_dense else 4096
+                diag_sliding_window_size = 8192 if require_dense else 4096
 
                 chunk_size = layer_config.stages[-1].stage_chunk_size
                 block_size_q = layer_config.stages[-1].stage_block_size_q
