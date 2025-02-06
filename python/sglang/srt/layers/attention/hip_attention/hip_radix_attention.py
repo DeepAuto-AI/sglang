@@ -86,7 +86,7 @@ class HiPRadixAttentionBackend(AttentionBackend):
                     layer_config = self.hip_config.layers[layer_id]
                 exclude_window_size = layer_config.sliding_window_size // 2
                 diag_sliding_window_range = 131072
-                diag_sliding_window_size = 4096 if require_dense else 4096
+                diag_sliding_window_size = 8192 if require_dense else 4096
 
                 chunk_size = layer_config.stages[-1].stage_chunk_size
                 block_size_q = layer_config.stages[-1].stage_block_size_q
@@ -830,9 +830,9 @@ online_update={online_update}
             _layer_id=layer.layer_id,
         )
 
-        last_dense = 128
+        last_dense = 64
 
-        if is_decode or (query.shape[1] < (last_dense * 2)):
+        if is_decode or (query.shape[1] < (last_dense * 2)) or (last_dense <= 0):
             context, metadata = dual_stage_quadratic_hip_attention(
                 (query * sm_scale).to(query.dtype),
                 k,
@@ -843,7 +843,7 @@ online_update={online_update}
             context = context.to(query.dtype)
             context = context[:, -query.shape[1] :, :, :].contiguous()
         else:
-            if layer.layer_id < 16:
+            if layer.layer_id < 160:
                 assert query_for_mask is None
                 position_ids = args.position_ids
                 args.position_ids = position_ids[:, :-last_dense]

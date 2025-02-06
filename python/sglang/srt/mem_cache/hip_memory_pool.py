@@ -76,8 +76,11 @@ class HiPMetadataCachePool:
             additional_tokens = 0
             # if os.getenv("HIP_DEBUG_SNAP_KV", "0") == "1":
             #     additional_tokens += 8192
+            if os.getenv("HIP_DEBUG_UNION_HEAD", "0") == "1":
+                additional_tokens += layer_config.second_stage_k * (self.head_num - 1)
+
             if os.getenv("HIP_DIAG_INFO", None) != None:
-                additional_tokens += 4096 if require_dense else 4096
+                additional_tokens += 8192 if require_dense else 4096
             if os.getenv("HIP_DEBUG_ADD_DELAY_WINDOW", "0") == "1":
                 additional_tokens += layer_config.second_stage_k * (
                     64 // layer_config.stages[-1].stage_chunk_size
