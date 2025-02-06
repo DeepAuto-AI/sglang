@@ -622,8 +622,10 @@ class ModelRunner:
                     f"{self.max_total_num_tokens}. "
                     # f"Use the given value instead."
                 )
-            # self.max_total_num_tokens = min(self.max_total_num_tokens, max_total_tokens)
-            self.max_total_num_tokens = max_total_tokens
+            if self.server_args.enable_hip_attention:
+                self.max_total_num_tokens = max_total_tokens
+            else:
+                self.max_total_num_tokens = min(self.max_total_num_tokens, max_total_tokens)
 
         if self.max_total_num_tokens <= 0:
             raise RuntimeError(
