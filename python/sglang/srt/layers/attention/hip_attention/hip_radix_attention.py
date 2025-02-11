@@ -1012,40 +1012,44 @@ online_update={online_update}
         if (
             NEED_CHECKOUT
             and (self.tp_rank == 0)
-            and is_decode
             and (layer.layer_id in layers_to_capture)
         ):
             root = "./saves/sglang_decode"
             if not os.path.exists(root):
                 _CHECKOUT_COUNTER = 0
-            filename = (
-                f"{root}/checkout_sample_{_CHECKOUT_COUNTER}_layer_{layer.layer_id}.pth"
-            )
+            filename = f"{root}/checkout_sample_{_CHECKOUT_COUNTER}_layer_{layer.layer_id}_is_decode_{1 if is_decode else 0}.pth"
             os.makedirs(root, exist_ok=True)
-            torch.save(
-                {
-                    "q": query,
-                    "sm_scale": sm_scale,
-                    "k": (
-                        k
-                        if k is not None
-                        else args.gather_k_from_paged_cache(chunk_size=1)
-                    ),
-                    "v": (
-                        v
-                        if k is not None
-                        else args.gather_v_from_paged_cache(chunk_size=1)
-                    ),
-                    "block_table": block_table,
-                    "cos": layer.rope_cos,
-                    "sin": layer.rope_sin,
-                    "out": context,
-                    "metadata": metadata,
-                },
-                filename,
-            )
-            print(f"saved {filename}")
-            if layer.layer_id == max(layers_to_capture):
-                _CHECKOUT_COUNTER += 1
+
+            if is_decode or (
+                (not is_decode)
+                and (
+                    dst_seq_len not in [256, 512, 1024, 2048, 4096, 8192, 16384, 32768]
+                )
+            ):
+                torch.save(
+                    {
+                        "q": query,
+                        "sm_scale": sm_scale,
+                        "k": (
+                            k
+                            if k is not None
+                            else args.gather_k_from_paged_cache(chunk_size=1)
+                        ),
+                        "v": (
+                            v
+                            if k is not None
+                            else args.gather_v_from_paged_cache(chunk_size=1)
+                        ),
+                        "block_table": block_table,
+                        "cos": layer.rope_cos,
+                        "sin": layer.rope_sin,
+                        "out": context,
+                        "metadata": metadata,
+                    },
+                    filename,
+                )
+                if is_decode and (layer.layer_id == max(layers_to_capture)):
+                    _CHECKOUT_COUNTER += 1
+                print(f"saved {filename}")
 
         return context.view(N, num_heads, hidden_dims), metadata

@@ -73,6 +73,7 @@ _DEFAULT_LAEYRS = [
         scan_extend_backend="streaming",
     ),
     HiPAttentionPerLayerConfig(
+        # sliding_window_size = 777, # NOTE: debugging sw
         second_stage_k=2048,
         sa_extend_backend="streaming",
         scan_extend_backend="relative",
