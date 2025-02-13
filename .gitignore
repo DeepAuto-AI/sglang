@@ -227,7 +227,3 @@ compile_commands.json
 .vscode
 
 1
-
-# Profiling data
-*.nsys-rep
-*.ncu-rep
