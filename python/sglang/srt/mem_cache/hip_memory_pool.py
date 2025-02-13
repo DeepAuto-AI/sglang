@@ -85,8 +85,6 @@ class HiPMetadataCachePool:
                 additional_tokens += layer_config.second_stage_k * (
                     64 // layer_config.stages[-1].stage_chunk_size
                 )
-            # if (os.getenv('HIP_DEBUG_IMPORTANT_K', '0') == '1'):
-            #     additional_tokens += 8192
 
             actual_tokens = layer_config.second_stage_k + additional_tokens
             if actual_tokens != layer_config.second_stage_k:
@@ -190,11 +188,17 @@ class HiPMetadataCachePool:
                         "B,1,H",
                         torch.bfloat16,
                     )
+        self.num_delays = int(os.getenv("HIP_DEBUG_DELAYED_STAGE0", "0"))
+        self.delayed_first_stage = [[] for _ in range(self.layer_num)]
 
         self.allocated_gpu_bytes = self.compute_allocated_bytes()
         logger.info(
             f"Allocated HiP metadata cache pool size: {self.allocated_gpu_bytes / 1024 / 1024:.2f} MB"
         )
+
+    def reset_decode_phase(self):
+        for layer in self.delayed_first_stage:
+            layer.clear()
 
     def compute_allocated_bytes(self):
         t = 0
@@ -361,15 +365,68 @@ class HiPMetadataCachePool:
         if metadata.stage_caches is not None:
             for i_stage, cache in enumerate(metadata.stage_caches):
                 if i_stage > 0:
-                    self.set_buffer(
-                        layer_id, f"stage_{i_stage}_indices_left", cache.indices_left
-                    )
-                    self.set_buffer(
-                        layer_id, f"stage_{i_stage}_indices_right", cache.indices_right
-                    )
-                    self.set_buffer(
-                        layer_id, f"stage_{i_stage}_out_scores", cache.out_scores
-                    )
+                    if i_stage == 1:
+                        if (
+                            torch.cuda.is_current_stream_capturing()
+                            and self.num_delays > 0
+                        ):
+                            raise Exception(
+                                "delayed stage is only supported on eager mode for research purpose."
+                            )
+                        if len(self.delayed_first_stage[layer_id]) == 0:
+                            self.set_buffer(
+                                layer_id,
+                                f"stage_{i_stage}_indices_left",
+                                cache.indices_left,
+                            )
+                            self.set_buffer(
+                                layer_id,
+                                f"stage_{i_stage}_indices_right",
+                                cache.indices_right,
+                            )
+                            self.set_buffer(
+                                layer_id,
+                                f"stage_{i_stage}_out_scores",
+                                cache.out_scores,
+                            )
+                        self.delayed_first_stage[layer_id].append(
+                            {
+                                "indices_left": cache.indices_left,
+                                "indices_right": cache.indices_right,
+                                "out_scores": cache.out_scores,
+                            }
+                        )
+                        if len(self.delayed_first_stage[layer_id]) > self.num_delays:
+                            delayed_state = self.delayed_first_stage[layer_id].pop(0)
+                            self.set_buffer(
+                                layer_id,
+                                f"stage_{i_stage}_indices_left",
+                                delayed_state["indices_left"],
+                            )
+                            self.set_buffer(
+                                layer_id,
+                                f"stage_{i_stage}_indices_right",
+                                delayed_state["indices_right"],
+                            )
+                            self.set_buffer(
+                                layer_id,
+                                f"stage_{i_stage}_out_scores",
+                                delayed_state["out_scores"],
+                            )
+                    else:
+                        self.set_buffer(
+                            layer_id,
+                            f"stage_{i_stage}_indices_left",
+                            cache.indices_left,
+                        )
+                        self.set_buffer(
+                            layer_id,
+                            f"stage_{i_stage}_indices_right",
+                            cache.indices_right,
+                        )
+                        self.set_buffer(
+                            layer_id, f"stage_{i_stage}_out_scores", cache.out_scores
+                        )
 
     def compute_cache_statistics(self, batch_size: int):
         def compute(prefix):
