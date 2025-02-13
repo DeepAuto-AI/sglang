@@ -1242,6 +1242,64 @@ class RowParallelLinear(LinearBase):
             output = tensor_model_parallel_all_reduce(output_parallel)
         else:
             output = output_parallel
+        
+        # if self.tp_size == 8:
+        #     output_parallel = self.quant_method.apply(self, input_parallel, bias=bias_)
+        #     output = tensor_model_parallel_all_reduce(output_parallel)
+        # elif self.tp_size == 4:
+        #     # input_parallel_1 = input_parallel.clone()
+        #     # input_parallel_1[:, :input_parallel.shape[1] // 2].fill_(0)
+        #     # input_parallel_2 = input_parallel.clone()
+        #     # input_parallel_2[:, input_parallel.shape[1] // 2:].fill_(0)
+        #     # output_parallel_1 = self.quant_method.apply(self, input_parallel_1, bias=bias_)
+        #     # output_parallel_2 = self.quant_method.apply(self, input_parallel_2, bias=None)
+            
+        #     # output1 = tensor_model_parallel_all_reduce(output_parallel_1)
+        #     # output2 = tensor_model_parallel_all_reduce(output_parallel_2)
+        #     # output = (output1.to(torch.float32) + output2.to(torch.float32)).to(torch.bfloat16)
+            
+        #     # outputs = tensor_model_parallel_all_gather(torch.cat([output_parallel_1, output_parallel_2], dim=-1))
+        #     # outputs = torch.chunk(outputs, 8, dim=-1)
+            
+        #     # 3040 (0.8%) torch sum
+        #     # output = torch.sum(torch.stack(outputs, dim=0), dim=0)
+            
+        #     # 4064 (1.7%) from front
+        #     # output = outputs[0]
+        #     # for o in outputs[1:]:
+        #     #     output += o
+            
+        #     # 4064 (1.7%) from front
+        #     # output = outputs[0] + outputs[1] + outputs[2] + outputs[3] + outputs[4] + outputs[5] + outputs[6] + outputs[7]
+            
+        #     # 3664 (1.6%) merge sum
+        #     # output = ((outputs[0] + outputs[1]) + (outputs[2] + outputs[3])) + ((outputs[4] + outputs[5]) + (outputs[6] + outputs[7]))
+            
+        #     # 3760 (1.8%) from backward
+        #     # output = outputs[0] + (outputs[1] + (outputs[2] + (outputs[3] + (outputs[4] + (outputs[5] + (outputs[6] + outputs[7]))))))
+            
+        #     # 3760 (1.8%)
+        #     # rank = get_tensor_model_parallel_rank()
+        #     # world_size = get_tensor_model_parallel_world_size()
+        #     # output = outputs[rank]
+        #     # for i in range(1, world_size):
+        #     #     outupt += outputs[(rank + i) % world_size]
+            
+        #     # 3760 (1.8%)
+        #     # rank = get_tensor_model_parallel_rank()
+        #     # world_size = get_tensor_model_parallel_world_size()
+        #     # output = outputs[rank].to(torch.float32)
+        #     # for i in range(1, world_size):
+        #     #     outupt += outputs[(rank + i) % world_size]
+        #     # output = output.to(input_parallel.dtype)
+            
+        #     # 3040 (0.8%) from front
+        #     # output = outputs[0].to(torch.float32)
+        #     # for o in outputs[1:]:
+        #     #     output += o
+        #     # output = output.to(input_parallel.dtype)
+        # else:
+        #     raise Exception('todo')
 
         output_bias = self.bias if self.skip_bias_add else None
 

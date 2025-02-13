@@ -26,6 +26,7 @@ from transformers import LlamaConfig
 from sglang.srt.distributed import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    get_tp_group,
 )
 from sglang.srt.layers.activation import SiluAndMul
 from sglang.srt.layers.layernorm import RMSNorm
@@ -192,7 +193,17 @@ class LlamaAttention(nn.Module):
             q, k = self.rotary_emb(positions, q, k)
 
         attn_output = self.attn(q, k, v, forward_batch)
-        output, _ = self.o_proj(attn_output)
+        
+        output, _ = self.o_proj(attn_output) # first place that reduce sum happen.
+        
+        # # NOTE: `attn_output` okay but `output` not okay
+        # if get_tensor_model_parallel_rank() == 0:
+        #     path = f'dummy_{get_tensor_model_parallel_rank()}_{get_tensor_model_parallel_world_size()}.pth'
+        #     torch.save((output, attn_output,), path)
+        #     print(get_tensor_model_parallel_rank(), attn_output, output)
+        # get_tp_group().barrier()
+        # raise Exception('killed')
+        
         return output
 
 
