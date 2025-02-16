@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import os
 
 """
@@ -40,9 +41,9 @@ class HiPRadixAttentionBackend(AttentionBackend):
         self.is_offload_enabled = model_runner.server_args.enable_hip_offload
 
         self.max_context_len = model_runner.model_config.context_len
-        
+
         self.tp_rank = model_runner.tp_rank
-        
+
         # NOTE: query caching: this is quite temporary one.
         self.q_buffers = [
             torch.zeros(
@@ -264,7 +265,6 @@ class HiPRadixAttentionBackend(AttentionBackend):
                     offloading_metadata=offloading_metadata,
                     is_decode=False,
                     diag_sliding_window_indices=self.diag_sliding_window_indices,
-                    layer_id=layer.layer_id,
                 )
 
                 o[start_len : start_len + seq_len] = o_req
@@ -324,7 +324,7 @@ class HiPRadixAttentionBackend(AttentionBackend):
             offload_cache, offloading_metadata = (
                 forward_batch.token_to_kv_pool.get_kv_buffer(layer.layer_id)
             )
-        
+
         self.push_q_buffer(
             q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim),
             layer_id=layer.layer_id,
@@ -360,7 +360,6 @@ class HiPRadixAttentionBackend(AttentionBackend):
             is_decode=True,
             query_for_mask=q_for_masking,
             diag_sliding_window_indices=self.diag_sliding_window_indices,
-            layer_id=layer.layer_id,
         )
 
         forward_batch.hip_metadata_cache_pool.set_hip_metadata_cache(
