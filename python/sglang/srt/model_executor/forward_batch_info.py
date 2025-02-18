@@ -290,6 +290,8 @@ class ForwardBatch:
         # Init HiP attention information
         if model_runner.hip_metadata_cache_pool is not None:
             ret.hip_metadata_cache_pool = model_runner.hip_metadata_cache_pool
+            if batch.hip_metadata_cached_stages < 0:
+                ret.hip_metadata_cache_pool.reset_decode_phase()
             ret.hip_metadata_cached_stages = batch.hip_metadata_cached_stages
 
         # Init lora information
