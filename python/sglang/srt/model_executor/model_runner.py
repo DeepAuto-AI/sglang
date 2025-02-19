@@ -698,7 +698,7 @@ class ModelRunner:
 
         self.hip_metadata_cache_pool = None
         if self.server_args.enable_hip_attention:
-            from hip.models.hip_attention.gen3 import HiPMetadataCachePool
+            from hip_attn.v1_2 import HiPMetadataCachePool
 
             self.hip_metadata_cache_pool = HiPMetadataCachePool(
                 self.max_total_num_tokens,

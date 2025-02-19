@@ -14,7 +14,7 @@ from sglang.srt.layers.attention import AttentionBackend
 from sglang.srt.mem_cache.hip_offload_kv_pool_mha import MHATokenToHiPOffloadKVPool
 
 if TYPE_CHECKING:
-    from hip.models.hip_attention.gen3 import HiPAttentionConfig
+    from hip_attn.v1_2 import HiPAttentionConfig
 
     from sglang.srt.layers.radix_attention import RadixAttention
     from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
@@ -29,7 +29,7 @@ class HiPRadixAttentionBackend(AttentionBackend):
     def __init__(self, model_runner: ModelRunner):
         super().__init__()
 
-        from hip.models.hip_attention.gen3 import forward_paged_hip
+        from hip_attn.v1_2 import forward_paged_hip
 
         self.forward_paged_hip = forward_paged_hip
 
