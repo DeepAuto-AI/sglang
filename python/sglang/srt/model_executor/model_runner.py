@@ -636,7 +636,9 @@ class ModelRunner:
             if self.server_args.enable_hip_offload:
                 self.max_total_num_tokens = max_total_tokens
             else:
-                self.max_total_num_tokens = min(self.max_total_num_tokens, max_total_tokens)
+                self.max_total_num_tokens = min(
+                    self.max_total_num_tokens, max_total_tokens
+                )
 
         if self.max_total_num_tokens <= 0:
             raise RuntimeError(
