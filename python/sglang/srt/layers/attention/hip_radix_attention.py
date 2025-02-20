@@ -290,14 +290,16 @@ class HiPRadixAttentionBackend(AttentionBackend):
             else forward_batch.encoder_out_cache_loc
         )
 
-        metadata = None
-        if forward_batch.hip_metadata_cached_stages <= 0:
-            metadata = forward_batch.hip_metadata_cache_pool.get_hip_metadata_cache(
-                layer.layer_id,
-                q.shape[0],
-                forward_batch.batch_size,
-                max(0, forward_batch.hip_metadata_cached_stages),
-            )
+        metadata = forward_batch.hip_metadata_cache_pool.get_hip_metadata_cache(
+            layer.layer_id,
+            q.shape[0],
+            forward_batch.batch_size,
+            (
+                None
+                if forward_batch.hip_metadata_cached_stages == None
+                else max(0, forward_batch.hip_metadata_cached_stages)
+            ),
+        )
 
         if not self.is_offload_enabled:
             if k is not None:
