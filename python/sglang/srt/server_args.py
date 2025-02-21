@@ -121,8 +121,8 @@ class ServerArgs:
 
     # HiP Attention Offload
     enable_hip_offload: bool = False
-    hip_max_mask_cache_token_size: int = 128 * 1024
-    hip_max_sa_cache_token_size: int = 16 * 1024
+    hip_max_mask_cache_token_size: int = 64 * 1024
+    hip_max_sa_cache_token_size: int = 8 * 1024
 
     # LoRA
     lora_paths: Optional[List[str]] = None
