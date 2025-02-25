@@ -1,11 +1,12 @@
 import argparse
 import itertools
-import time
 
 import torch
 import triton
 import triton.language as tl
 from sgl_kernel import moe_align_block_size
+
+USE_RANDOM_PERM = False
 
 
 def ceil_div(a, b):
@@ -141,8 +142,13 @@ def moe_align_block_size_triton(
 def calculate_diff(batch_size, seq_len):
     num_experts = 256
     block_size = 128
-    topk_ids = torch.randint(
-        0, num_experts, (batch_size, seq_len), dtype=torch.int32, device="cuda"
+    topk = 8
+
+    topk_ids = torch.stack(
+        [
+            torch.randperm(num_experts, dtype=torch.int32, device="cuda")[:topk]
+            for _ in range(batch_size * seq_len)
+        ]
     )
 
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
@@ -151,25 +157,25 @@ def calculate_diff(batch_size, seq_len):
     )
     sorted_ids_cuda.fill_(topk_ids.numel())
     max_num_m_blocks = max_num_tokens_padded // block_size
-    expert_ids_cuda = torch.empty(
+    expert_ids_cuda = torch.zeros(
         (max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device
     )
     num_tokens_post_pad_cuda = torch.empty(
         (1), dtype=torch.int32, device=topk_ids.device
     )
-    token_cnts_buffer = torch.empty(
+    token_cnts_buffer = torch.zeros(
         (num_experts + 1) * num_experts, dtype=torch.int32, device=topk_ids.device
     )
-    cumsum_buffer = torch.empty(
+    cumsum_buffer = torch.zeros(
         num_experts + 1, dtype=torch.int32, device=topk_ids.device
     )
 
     sorted_ids_triton = torch.empty_like(sorted_ids_cuda)
     sorted_ids_triton.fill_(topk_ids.numel())
-    expert_ids_triton = torch.empty_like(expert_ids_cuda)
+    expert_ids_triton = torch.zeros_like(expert_ids_cuda)
     num_tokens_post_pad_triton = torch.empty_like(num_tokens_post_pad_cuda)
 
-    # 运行两个实现
+    # compare the performance of cuda and triton implementation
     moe_align_block_size(
         topk_ids,
         num_experts,
@@ -206,6 +212,15 @@ seq_length_range = [2**i for i in range(0, 16)]
 configs = list(itertools.product(batch_size_range, seq_length_range))
 
 
+def get_topk_ids(num_tokens: int, num_experts: int, topk: int) -> torch.Tensor:
+    topk_ids = torch.zeros((num_tokens, topk), dtype=torch.int32, device="cuda")
+    for i in range(num_tokens):
+        topk_ids[i, :] = torch.randperm(num_experts, dtype=torch.int32, device="cuda")[
+            :topk
+        ]
+    return topk_ids
+
+
 @triton.testing.perf_report(
     triton.testing.Benchmark(
         x_names=["batch_size", "seq_len"],
@@ -223,9 +238,17 @@ def benchmark(batch_size, seq_len, provider):
     num_experts = 256
     block_size = 128
     topk = 8
-    topk_ids = torch.randint(
-        0, num_experts, (batch_size * seq_len, topk), dtype=torch.int32, device="cuda"
-    )
+
+    if USE_RANDOM_PERM:
+        topk_ids = get_topk_ids(batch_size * seq_len, num_experts, topk)
+    else:
+        topk_ids = torch.randint(
+            0,
+            num_experts,
+            (batch_size * seq_len, topk),
+            dtype=torch.int32,
+            device="cuda",
+        )
 
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     sorted_ids = torch.empty(
@@ -237,10 +260,10 @@ def benchmark(batch_size, seq_len, provider):
         (max_num_m_blocks,), dtype=torch.int32, device=topk_ids.device
     )
     num_tokens_post_pad = torch.empty((1), dtype=torch.int32, device=topk_ids.device)
-    token_cnts_buffer = torch.empty(
+    token_cnts_buffer = torch.zeros(
         (num_experts + 1) * num_experts, dtype=torch.int32, device=topk_ids.device
     )
-    cumsum_buffer = torch.empty(
+    cumsum_buffer = torch.zeros(
         num_experts + 1, dtype=torch.int32, device=topk_ids.device
     )
 
@@ -287,4 +310,4 @@ if __name__ == "__main__":
 
     calculate_diff(batch_size=4, seq_len=1024)
 
-    benchmark.run(print_data=True, save_path=args.save_path)
+    benchmark.run(print_data=True)

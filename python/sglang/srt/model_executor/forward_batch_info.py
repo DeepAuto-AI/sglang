@@ -38,16 +38,17 @@ import triton
 import triton.language as tl
 
 from sglang.srt.layers.rotary_embedding import MRotaryEmbedding
-from sglang.srt.utils import maybe_torch_compile
+from sglang.srt.utils import get_compiler_backend
 
 if TYPE_CHECKING:
+    from hip_attn.v1_2 import HiPMetadataCachePool
+
     from sglang.srt.layers.attention import AttentionBackend
     from sglang.srt.managers.schedule_batch import ImageInputs, ModelWorkerBatch
     from sglang.srt.mem_cache.memory_pool import BaseTokenToKVPool, ReqToTokenPool
     from sglang.srt.model_executor.model_runner import ModelRunner
     from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
     from sglang.srt.speculative.spec_info import SpecInfo, SpeculativeAlgorithm
-    from sglang.srt.mem_cache.hip_memory_pool import HiPMetadataCachePool
 
 
 class ForwardMode(IntEnum):
@@ -187,8 +188,7 @@ class ForwardBatch:
 
     # For HiP attention
     hip_metadata_cache_pool: Optional[HiPMetadataCachePool] = None
-    hip_use_cached_mask: Optional[bool] = None
-    hip_metadata_cached_stage: Optional[int] = None
+    hip_metadata_cached_stages: Optional[int] = None
 
     # For DP attention
     global_num_tokens: Optional[List[int]] = None
@@ -203,7 +203,111 @@ class ForwardBatch:
     # For Qwen2-VL
     mrope_positions: torch.Tensor = None
 
-    def compute_mrope_positions(
+    @classmethod
+    def init_new(
+        cls,
+        batch: ModelWorkerBatch,
+        model_runner: ModelRunner,
+    ):
+
+        device = model_runner.device
+        ret = cls(
+            forward_mode=batch.forward_mode,
+            batch_size=len(batch.seq_lens),
+            input_ids=batch.input_ids,
+            req_pool_indices=batch.req_pool_indices,
+            seq_lens=batch.seq_lens,
+            out_cache_loc=batch.out_cache_loc,
+            image_inputs=batch.image_inputs,
+            encoder_cached=batch.encoder_cached,
+            encoder_lens=batch.encoder_lens,
+            encoder_lens_cpu=batch.encoder_lens_cpu,
+            encoder_out_cache_loc=batch.encoder_out_cache_loc,
+            seq_lens_sum=batch.seq_lens_sum,
+            return_logprob=batch.return_logprob,
+            top_logprobs_nums=batch.top_logprobs_nums,
+            global_num_tokens=batch.global_num_tokens,
+            can_run_dp_cuda_graph=batch.can_run_dp_cuda_graph,
+            lora_paths=batch.lora_paths,
+            sampling_info=batch.sampling_info,
+            req_to_token_pool=model_runner.req_to_token_pool,
+            token_to_kv_pool=model_runner.token_to_kv_pool,
+            attn_backend=model_runner.attn_backend,
+            spec_algorithm=batch.spec_algorithm,
+            spec_info=batch.spec_info,
+            capture_hidden_mode=batch.capture_hidden_mode,
+            input_embeds=batch.input_embeds,
+        )
+
+        if ret.global_num_tokens is not None:
+            max_len = max(ret.global_num_tokens)
+            ret.gathered_buffer = torch.zeros(
+                (max_len * model_runner.tp_size, model_runner.model_config.hidden_size),
+                dtype=model_runner.dtype,
+                device=device,
+            )
+
+        if ret.forward_mode.is_idle():
+            ret.positions = torch.empty((0,), device=device)
+            return ret
+
+        # Override the positions with spec_info
+        if (
+            ret.spec_info is not None
+            and getattr(ret.spec_info, "positions", None) is not None
+        ):
+            ret.positions = ret.spec_info.positions
+
+        # Init position information
+        if ret.forward_mode.is_decode():
+            if ret.positions is None:
+                ret.positions = clamp_position(batch.seq_lens)
+        else:
+            ret.extend_seq_lens = torch.tensor(
+                batch.extend_seq_lens, dtype=torch.int32
+            ).to(device, non_blocking=True)
+            ret.extend_prefix_lens = torch.tensor(
+                batch.extend_prefix_lens, dtype=torch.int32
+            ).to(device, non_blocking=True)
+            if (
+                model_runner.server_args.attention_backend != "torch_native"
+                and model_runner.server_args.speculative_algorithm != "NEXTN"
+            ):
+                ret.extend_num_tokens = batch.extend_num_tokens
+                positions, ret.extend_start_loc = compute_position_triton(
+                    ret.extend_prefix_lens, ret.extend_seq_lens, ret.extend_num_tokens
+                )
+            else:
+                positions, ret.extend_start_loc = compute_position_torch(
+                    ret.extend_prefix_lens, ret.extend_seq_lens
+                )
+            if ret.positions is None:
+                ret.positions = positions
+            ret.extend_prefix_lens_cpu = batch.extend_prefix_lens
+            ret.extend_seq_lens_cpu = batch.extend_seq_lens
+            ret.extend_logprob_start_lens_cpu = batch.extend_logprob_start_lens
+
+        if model_runner.model_is_mrope:
+            ret._compute_mrope_positions(model_runner, batch)
+
+        # Init HiP attention information
+        if model_runner.hip_metadata_cache_pool is not None:
+            ret.hip_metadata_cache_pool = model_runner.hip_metadata_cache_pool
+            if isinstance(batch.hip_metadata_cached_stages, int) and (
+                batch.hip_metadata_cached_stages < 0
+            ):
+                ret.hip_metadata_cache_pool.reset_decode_phase()
+                ret.hip_metadata_cached_stages = 0
+            else:
+                ret.hip_metadata_cached_stages = batch.hip_metadata_cached_stages
+
+        # Init lora information
+        if model_runner.server_args.lora_paths is not None:
+            model_runner.lora_manager.prepare_lora_batch(ret)
+
+        return ret
+
+    def _compute_mrope_positions(
         self, model_runner: ModelRunner, batch: ModelWorkerBatch
     ):
         device = model_runner.device
@@ -254,110 +358,11 @@ class ForwardBatch:
                     )
                     batch.image_inputs[i].mrope_position_delta = mrope_position_delta
                 mrope_positions_list[i] = mrope_positions
-
         self.mrope_positions = torch.concat(
             [torch.tensor(pos, device=device) for pos in mrope_positions_list],
             axis=1,
         )
         self.mrope_positions = self.mrope_positions.to(torch.int64)
-
-    @classmethod
-    def init_new(
-        cls,
-        batch: ModelWorkerBatch,
-        model_runner: ModelRunner,
-    ):
-
-        device = model_runner.device
-        ret = cls(
-            forward_mode=batch.forward_mode,
-            batch_size=len(batch.seq_lens),
-            input_ids=batch.input_ids,
-            req_pool_indices=batch.req_pool_indices,
-            seq_lens=batch.seq_lens,
-            out_cache_loc=batch.out_cache_loc,
-            image_inputs=batch.image_inputs,
-            encoder_cached=batch.encoder_cached,
-            encoder_lens=batch.encoder_lens,
-            encoder_lens_cpu=batch.encoder_lens_cpu,
-            encoder_out_cache_loc=batch.encoder_out_cache_loc,
-            seq_lens_sum=batch.seq_lens_sum,
-            return_logprob=batch.return_logprob,
-            top_logprobs_nums=batch.top_logprobs_nums,
-            global_num_tokens=batch.global_num_tokens,
-            can_run_dp_cuda_graph=batch.can_run_dp_cuda_graph,
-            lora_paths=batch.lora_paths,
-            sampling_info=batch.sampling_info,
-            spec_algorithm=batch.spec_algorithm,
-            spec_info=batch.spec_info,
-            capture_hidden_mode=batch.capture_hidden_mode,
-            input_embeds=batch.input_embeds,
-        )
-
-        if ret.global_num_tokens is not None:
-            max_len = max(ret.global_num_tokens)
-            ret.gathered_buffer = torch.zeros(
-                (max_len * model_runner.tp_size, model_runner.model_config.hidden_size),
-                dtype=model_runner.dtype,
-                device=device,
-            )
-
-        if ret.forward_mode.is_idle():
-            ret.positions = torch.empty((0,), device=device)
-            return ret
-
-        # Override the positions with spec_info
-        if (
-            ret.spec_info is not None
-            and getattr(ret.spec_info, "positions", None) is not None
-        ):
-            ret.positions = ret.spec_info.positions
-
-        # Init position information
-        if ret.forward_mode.is_decode():
-            if ret.positions is None:
-                ret.positions = clamp_position(batch.seq_lens)
-        else:
-            ret.extend_seq_lens = torch.tensor(
-                batch.extend_seq_lens, dtype=torch.int32
-            ).to(device, non_blocking=True)
-            ret.extend_prefix_lens = torch.tensor(
-                batch.extend_prefix_lens, dtype=torch.int32
-            ).to(device, non_blocking=True)
-            if model_runner.server_args.attention_backend != "torch_native":
-                ret.extend_num_tokens = batch.extend_num_tokens
-                positions, ret.extend_start_loc = compute_position_triton(
-                    ret.extend_prefix_lens, ret.extend_seq_lens, ret.extend_num_tokens
-                )
-            else:
-                positions, ret.extend_start_loc = compute_position_torch(
-                    ret.extend_prefix_lens, ret.extend_seq_lens
-                )
-            if ret.positions is None:
-                ret.positions = positions
-            ret.extend_prefix_lens_cpu = batch.extend_prefix_lens
-            ret.extend_seq_lens_cpu = batch.extend_seq_lens
-            ret.extend_logprob_start_lens_cpu = batch.extend_logprob_start_lens
-
-        if model_runner.model_is_mrope:
-            ret.compute_mrope_positions(model_runner, batch)
-
-        # Init attention information
-        ret.req_to_token_pool = model_runner.req_to_token_pool
-        ret.token_to_kv_pool = model_runner.token_to_kv_pool
-        ret.attn_backend = model_runner.attn_backend
-
-        # Init HiP attention information
-        if hasattr(model_runner, 'hip_metadata_cache_pool'):
-            ret.hip_metadata_cache_pool = model_runner.hip_metadata_cache_pool
-            ret.hip_use_cached_mask = batch.hip_use_cached_mask
-            ret.hip_metadata_cached_stage = batch.hip_metadata_cached_stages
-
-        # Init lora information
-        if model_runner.server_args.lora_paths is not None:
-            model_runner.lora_manager.prepare_lora_batch(ret)
-
-        return ret
 
     def on_model_start(self):
         self.token_to_kv_pool.on_model_start(self)
@@ -370,6 +375,7 @@ class ForwardBatch:
 
     def on_layer_end(self, layer_id: int):
         self.token_to_kv_pool.on_layer_end(self, layer_id)
+
 
 def compute_position_triton(
     extend_prefix_lens: torch.Tensor, extend_seq_lens: torch.Tensor, extend_seq_lens_sum
@@ -440,6 +446,6 @@ def compute_position_torch(
     return positions.to(torch.int64), extend_start_loc
 
 
-@maybe_torch_compile(dynamic=True)
+@torch.compile(dynamic=True, backend=get_compiler_backend())
 def clamp_position(seq_lens):
     return torch.clamp((seq_lens - 1), min=0).to(torch.int64)

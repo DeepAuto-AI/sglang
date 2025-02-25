@@ -1,4 +1,4 @@
-<div align="center"  id="sglangtop">
+<div align="center" id="sglangtop">
 <img src="https://raw.githubusercontent.com/sgl-project/sglang/main/assets/logo.png" alt="logo" width="400" margin="10px"></img>
 
 [![PyPI](https://img.shields.io/pypi/v/sglang)](https://pypi.org/project/sglang)
@@ -12,49 +12,6 @@
 
 --------------------------------------------------------------------------------
 
-For KV cache offloading preview users, install `gmlwns2000/hip-ainl` first.
-
-```bash
-# Following setting is tested on 1x RTX 4090 24GB
-
-# Maximum batch size to capture. Larger size requires more temporary buffers.
-export SRT_MAX_BATCH=1;
-# You can disable chunked prefill by change this into -1.
-export CHUNK_PREFILL=16384;
-# Any RoPE based attention models are supported in theoritically.
-# However currently we are supports `llama.py` models. (Llama Family)
-export MODEL="hugging-quants/Meta-Llama-3.1-8B-Instruct-AWQ-INT4";
-# You can set upper limit of maximum extended context window. 
-# Training-free and unlimited.
-export EXTENDED_CONTEXT_LEN=196608;
-# You can change this flag into 1, if you want test online cache update. (exprimental)
-export DEBUG_ONLINE=0;
-
-python -m sglang.launch_server \
-    --model-path $MODEL \
-    # Supports auto and fp8_e5m2. Online cache updates are not supports fp8.
-    --kv-cache-dtype auto \
-    # You can increase this to use multi GPU.
-    --tp-size 1 \
-    --port 30000 \
-    --chunked-prefill-size $CHUNK_PREFILL \
-    --max-prefill-tokens $CHUNK_PREFILL \
-    --context-length $EXTENDED_CONTEXT_LEN \
-    --max-total-tokens $EXTENDED_CONTEXT_LEN \
-    --enable-hip-attention \
-    # You can turn off this flag to disable offloading. 
-    # Offloading may have difference in decoding result.
-    --enable-hip-offload \
-    # For on-gpu offloading cache in masking kernel, 
-    # allocate size of cache in num of tokens. This is shared by whole batch.
-    --hip-max-mask-cache-token-size 32000 \
-    # For on-gpu offloading cache in block sparse attention kernel, 
-    # allocate size of cache in num of tokens. This is shared by whole batch.
-    --hip-max-sa-cache-token-size 10000;
-```
-
---------------------------------------------------------------------------------
-
 | [**Blog**](https://lmsys.org/blog/2024-07-25-sglang-llama3/)
 | [**Documentation**](https://docs.sglang.ai/)
 | [**Join Slack**](https://slack.sglang.ai/)
@@ -62,16 +19,16 @@ python -m sglang.launch_server \
 | [**Slides**](https://github.com/sgl-project/sgl-learning-materials?tab=readme-ov-file#slides) |
 
 ## News
-- [2024/12] 🔥 SGLang v0.4: Zero-Overhead Batch Scheduler, Cache-Aware Load Balancer, Faster Structured Outputs ([blog](https://lmsys.org/blog/2024-12-04-sglang-v0-4/)).
-- [2024/10] 🔥 The First SGLang Online Meetup ([slides](https://github.com/sgl-project/sgl-learning-materials?tab=readme-ov-file#the-first-sglang-online-meetup)).
-- [2024/09] SGLang v0.3 Release: 7x Faster DeepSeek MLA, 1.5x Faster torch.compile, Multi-Image/Video LLaVA-OneVision ([blog](https://lmsys.org/blog/2024-09-04-sglang-v0-3/)).
-- [2024/07] Faster Llama3 Serving with SGLang Runtime (vs. TensorRT-LLM, vLLM) ([blog](https://lmsys.org/blog/2024-07-25-sglang-llama3/)).
+- [2025/01] 🔥 SGLang provides day one support for DeepSeek V3/R1 models on NVIDIA and AMD GPUs with DeepSeek-specific optimizations. ([instructions](https://github.com/sgl-project/sglang/tree/main/benchmark/deepseek_v3), [AMD blog](https://www.amd.com/en/developer/resources/technical-articles/amd-instinct-gpus-power-deepseek-v3-revolutionizing-ai-development-with-sglang.html), [10+ other companies](https://x.com/lmsysorg/status/1887262321636221412))
+- [2024/12] 🔥 v0.4 Release: Zero-Overhead Batch Scheduler, Cache-Aware Load Balancer, Faster Structured Outputs ([blog](https://lmsys.org/blog/2024-12-04-sglang-v0-4/)).
+- [2024/09] v0.3 Release: 7x Faster DeepSeek MLA, 1.5x Faster torch.compile, Multi-Image/Video LLaVA-OneVision ([blog](https://lmsys.org/blog/2024-09-04-sglang-v0-3/)).
+- [2024/07] v0.2 Release: Faster Llama3 Serving with SGLang Runtime (vs. TensorRT-LLM, vLLM) ([blog](https://lmsys.org/blog/2024-07-25-sglang-llama3/)).
 
 <details>
 <summary>More</summary>
 
+- [2024/10] The First SGLang Online Meetup ([slides](https://github.com/sgl-project/sgl-learning-materials?tab=readme-ov-file#the-first-sglang-online-meetup)).
 - [2024/02] SGLang enables **3x faster JSON decoding** with compressed finite state machine ([blog](https://lmsys.org/blog/2024-02-05-compressed-fsm/)).
-- [2024/04] SGLang is used by the official **LLaVA-NeXT (video)** release ([blog](https://llava-vl.github.io/blog/2024-04-30-llava-next-video/)).
 - [2024/01] SGLang provides up to **5x faster inference** with RadixAttention ([blog](https://lmsys.org/blog/2024-01-17-sglang/)).
 - [2024/01] SGLang powers the serving of the official **LLaVA v1.6** release demo ([usage](https://github.com/haotian-liu/LLaVA?tab=readme-ov-file#demo)).
 
@@ -89,7 +46,7 @@ The core features include:
 
 ## Getting Started
 - [Install SGLang](https://docs.sglang.ai/start/install.html)
-- [Quick Start](https://docs.sglang.ai/start/send_request.html)
+- [Quick Start](https://docs.sglang.ai/backend/send_request.html)
 - [Backend Tutorial](https://docs.sglang.ai/backend/openai_api_completions.html)
 - [Frontend Tutorial](https://docs.sglang.ai/frontend/frontend.html)
 - [Contribution Guide](https://docs.sglang.ai/references/contribution_guide.html)
@@ -101,7 +58,14 @@ Learn more in the release blogs: [v0.2 blog](https://lmsys.org/blog/2024-07-25-s
 [Development Roadmap (2024 Q4)](https://github.com/sgl-project/sglang/issues/1487)
 
 ## Adoption and Sponsorship
-The project is supported by (alphabetically): AMD, Baseten, Cursor, DataCrunch, Etched, Hyperbolic, Jam & Tea Studios, LinkedIn, LMSYS.org, Meituan, NVIDIA, RunPod, Stanford, UC Berkeley, UCLA, xAI, 01.AI.
+The project has been deployed to large-scale production, generating trillions of tokens every day.
+It is supported by the following institutions: AMD, Atlas Cloud, Baseten, Cursor, DataCrunch, Etched, Hyperbolic, Jam & Tea Studios, LinkedIn, LMSYS, Meituan, Nebius, Novita AI, NVIDIA, RunPod, Stanford, UC Berkeley, UCLA, xAI, and 01.AI.
+
+<img src="https://raw.githubusercontent.com/sgl-project/sgl-learning-materials/main/slides/adoption.png" alt="logo" width="800" margin="10px"></img>
+
+## Contact Us
+
+For enterprises interested in adopting or deploying SGLang at scale, including technical consulting, sponsorship opportunities, or partnership inquiries, please contact us at contact@sglang.ai.
 
 ## Acknowledgment and Citation
 We learned the design and reused code from the following projects: [Guidance](https://github.com/guidance-ai/guidance), [vLLM](https://github.com/vllm-project/vllm), [LightLLM](https://github.com/ModelTC/lightllm), [FlashInfer](https://github.com/flashinfer-ai/flashinfer), [Outlines](https://github.com/outlines-dev/outlines), and [LMQL](https://github.com/eth-sri/lmql). Please cite the paper, [SGLang: Efficient Execution of Structured Language Model Programs](https://arxiv.org/abs/2312.07104), if you find the project useful.

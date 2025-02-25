@@ -40,10 +40,10 @@ from sglang.srt.layers.vocab_parallel_embedding import (
 from sglang.srt.managers.schedule_batch import global_server_args_dict
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
-from sglang.srt.utils import is_flashinfer_available
+from sglang.srt.utils import is_cuda_available
 
-if is_flashinfer_available():
-    from flashinfer import bmm_fp8
+if is_cuda_available():
+    from sgl_kernel import bmm_fp8
 
 
 class MiniCPM3MLP(nn.Module):
@@ -602,6 +602,8 @@ class MiniCPM3ForCausalLM(nn.Module):
             if "rotary_emb.cos_cached" in name or "rotary_emb.sin_cached" in name:
                 # Models trained using ColossalAI may include these tensors in
                 # the checkpoint. Skip them.
+                continue
+            if self.config.tie_word_embeddings and "lm_head.weight" in name:
                 continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:

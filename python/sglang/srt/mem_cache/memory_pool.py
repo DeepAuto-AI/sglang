@@ -27,14 +27,14 @@ import logging
 import threading
 from enum import IntEnum
 from functools import wraps
-from typing import List, Tuple, Union
+from typing import List, Optional, Tuple, Union
 
 import numpy as np
 import psutil
 import torch
 
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.layers.radix_attention import RadixAttention
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.utils import debug_timing, get_compiler_backend
 
 logger = logging.getLogger(__name__)
@@ -50,7 +50,6 @@ class ReqToTokenPool:
         size: int,
         max_context_len: int,
         device: str,
-        use_records: bool,
         enable_memory_saver: bool,
     ):
         memory_saver_adapter = TorchMemorySaverAdapter.create(
@@ -65,17 +64,9 @@ class ReqToTokenPool:
                 (size, max_context_len), dtype=torch.int32, device=device
             )
         self.free_slots = list(range(size))
-        self.write_records = []
-        self.use_records = use_records
-
-        if self.use_records:
-            self.write = self.write_with_records
-        else:
-            self.write = self.write_without_records
 
     def write(self, indices, values):
-        # Keep the signature for type checking. It will be assigned during runtime.
-        raise NotImplementedError()
+        self.req_to_token[indices] = values
 
     def available_size(self):
         return len(self.free_slots)
@@ -97,23 +88,6 @@ class ReqToTokenPool:
 
     def clear(self):
         self.free_slots = list(range(self.size))
-        self.write_records = []
-
-    def write_without_records(self, indices, values):
-        self.req_to_token[indices] = values
-
-    def write_with_records(self, indices, values):
-        self.req_to_token[indices] = values
-        self.write_records.append((indices, values))
-
-    def get_write_records(self):
-        ret = self.write_records
-        self.write_records = []
-        return ret
-
-    def apply_write_records(self, write_records: List[Tuple]):
-        for indices, values in write_records:
-            self.req_to_token[indices] = values
 
 
 class BaseTokenToKVPool:
@@ -204,6 +178,7 @@ class BaseTokenToKVPool:
 
     def on_layer_end(self, forward_batch: ForwardBatch, layer_id: int):
         pass
+
 
 class MHATokenToKVPool(BaseTokenToKVPool):
 
@@ -308,13 +283,17 @@ class MHATokenToKVPool(BaseTokenToKVPool):
         loc: torch.Tensor,
         cache_k: torch.Tensor,
         cache_v: torch.Tensor,
-        k_scale: float = 1.0,
-        v_scale: float = 1.0,
+        k_scale: Optional[float] = None,
+        v_scale: Optional[float] = None,
     ):
         layer_id = layer.layer_id
         if cache_k.dtype != self.dtype:
-            cache_k = (cache_k / k_scale).to(self.dtype)
-            cache_v = (cache_v / v_scale).to(self.dtype)
+            if k_scale is not None:
+                cache_k.div_(k_scale)
+            if v_scale is not None:
+                cache_v.div_(v_scale)
+            cache_k = cache_k.to(self.dtype)
+            cache_v = cache_v.to(self.dtype)
         if self.store_dtype != self.dtype:
             self.k_buffer[layer_id][loc] = cache_k.view(self.store_dtype)
             self.v_buffer[layer_id][loc] = cache_v.view(self.store_dtype)
@@ -476,7 +455,7 @@ class MLATokenToKVPoolHost:
     def __init__(
         self,
         device_pool: MHATokenToKVPool,
-        host_to_device_ratio: float = 2.0,
+        host_to_device_ratio: float = 4.0,
         pin_memory: bool = False,  # no need to use pin memory with the double buffering
         device: str = "cpu",
     ):
@@ -535,6 +514,9 @@ class MLATokenToKVPoolHost:
 
     def get_flat_data(self, indices):
         return self.kv_buffer[:, :, indices]
+
+    def assign_flat_data(self, indices, flat_data):
+        self.kv_buffer[:, :, indices] = flat_data
 
     @debug_timing
     def transfer(self, indices, flat_data):

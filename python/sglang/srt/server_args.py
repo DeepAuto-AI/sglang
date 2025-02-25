@@ -13,12 +13,14 @@
 # ==============================================================================
 """The arguments of the server."""
 
+from __future__ import annotations
+
 import argparse
 import dataclasses
 import logging
 import random
 import tempfile
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import torch
 
@@ -29,10 +31,13 @@ from sglang.srt.utils import (
     get_nvgpu_memory_capacity,
     is_flashinfer_available,
     is_hip,
-    is_ipv6,
     is_port_available,
+    is_valid_ipv6_address,
     nullable_str,
 )
+
+if TYPE_CHECKING:
+    from hip_attn.v1_2 import HiPAttentionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -75,6 +80,7 @@ class ServerArgs:
     # Other runtime options
     tp_size: int = 1
     stream_interval: int = 1
+    stream_output: bool = False
     random_seed: Optional[int] = None
     constrained_json_whitespace_pattern: Optional[str] = None
     watchdog_timeout: float = 300
@@ -111,16 +117,17 @@ class ServerArgs:
 
     # HiP Attention
     enable_hip_attention: bool = False
-    hip_attention_config: str = None
+    hip_attention_config: Optional[HiPAttentionConfig] = None
 
     # HiP Attention Offload
     enable_hip_offload: bool = False
-    hip_max_mask_cache_token_size: int = 128 * 1024
-    hip_max_sa_cache_token_size: int = 16 * 1024
-    
+    hip_max_mask_cache_token_size: int = 64 * 1024
+    hip_max_sa_cache_token_size: int = 8 * 1024
+
     # LoRA
     lora_paths: Optional[List[str]] = None
     max_loras_per_batch: int = 8
+    lora_backend: str = "triton"
 
     # Kernel backend
     attention_backend: Optional[str] = None
@@ -131,8 +138,8 @@ class ServerArgs:
     speculative_draft_model_path: Optional[str] = None
     speculative_algorithm: Optional[str] = None
     speculative_num_steps: int = 5
-    speculative_num_draft_tokens: int = 64
     speculative_eagle_topk: int = 8
+    speculative_num_draft_tokens: int = 64
 
     # Double Sparsity
     enable_double_sparsity: bool = False
@@ -147,6 +154,7 @@ class ServerArgs:
     disable_jump_forward: bool = False
     disable_cuda_graph: bool = False
     disable_cuda_graph_padding: bool = False
+    enable_nccl_nvls: bool = False
     disable_outlines_disk_cache: bool = False
     disable_custom_all_reduce: bool = False
     disable_mla: bool = False
@@ -167,6 +175,11 @@ class ServerArgs:
     delete_ckpt_after_loading: bool = False
     enable_memory_saver: bool = False
     allow_auto_truncate: bool = False
+    return_hidden_states: bool = False
+    enable_custom_logit_processor: bool = False
+    tool_call_parser: str = None
+    enable_hierarchical_cache: bool = False
+    enable_flashinfer_mla: bool = False
 
     def __post_init__(self):
         # Set missing default values
@@ -260,14 +273,17 @@ class ServerArgs:
             )
 
         # Speculative Decoding
-        if self.speculative_algorithm == "EAGLE":
+        if (
+            self.speculative_algorithm == "EAGLE"
+            or self.speculative_algorithm == "NEXTN"
+        ):
             self.prefill_only_one_req = True
             self.disable_cuda_graph_padding = True
             self.disable_radix_cache = True
             self.disable_overlap_schedule = True
             self.chunked_prefill_size = -1
             logger.info(
-                "The radix cache, chunked prefill, and overlap scheduler are disabled because of using eagle speculative decoding."
+                f"The radix cache, chunked prefill, and overlap scheduler are disabled because of using {self.speculative_algorithm} speculative decoding."
             )
 
         # GGUF
@@ -275,6 +291,10 @@ class ServerArgs:
             self.load_format == "auto" or self.load_format == "gguf"
         ) and check_gguf_file(self.model_path):
             self.quantization = self.load_format = "gguf"
+
+        # AMD-specific Triton attention KV splits default number
+        if is_hip():
+            self.triton_attention_num_kv_splits = 16
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -323,6 +343,7 @@ class ServerArgs:
                 "dummy",
                 "gguf",
                 "bitsandbytes",
+                "layered",
             ],
             help="The format of the model weights to load. "
             '"auto" will try to load the weights in the safetensors format '
@@ -336,7 +357,10 @@ class ServerArgs:
             "which is mainly for profiling."
             '"gguf" will load the weights in the gguf format. '
             '"bitsandbytes" will load the weights using bitsandbytes '
-            "quantization.",
+            "quantization."
+            '"layered" loads weights layer by layer so that one can quantize a '
+            "layer before loading another to make the peak memory envelope "
+            "smaller.",
         )
         parser.add_argument(
             "--trust-remote-code",
@@ -502,6 +526,11 @@ class ServerArgs:
             help="The interval (or buffer size) for streaming in terms of the token length. A smaller value makes streaming smoother, while a larger value makes the throughput higher",
         )
         parser.add_argument(
+            "--stream-output",
+            action="store_true",
+            help="Whether to output as a sequence of disjoint segments.",
+        )
+        parser.add_argument(
             "--random-seed",
             type=int,
             default=ServerArgs.random_seed,
@@ -648,30 +677,30 @@ class ServerArgs:
             default=ServerArgs.hip_attention_config,
             help="Path to the HiP attention config file, or the json in string format.",
         )
-        
+
         # HiP Attention Offload
         parser.add_argument(
             "--enable-hip-offload",
             action="store_true",
-            help="Enable HiP offloading. This flag should be set with --enable--hip-attention.",
+            help="Enable HiP KV cache offloading. This option should be set with --enable-hip-attention.",
         )
         parser.add_argument(
-            '--hip-max-mask-cache-token-size',
+            "--hip-max-mask-cache-token-size",
             type=int,
             default=128 * 1024,
             help=(
                 "On-gpu cache size of HiP masking kernels. "
-                "This will be major factor to determine mask refreshing decoding step."
-            )
+                "This will be a major determining factor for mask-refreshing decoding step latency."
+            ),
         )
         parser.add_argument(
-            '--hip-max-sa-cache-token-size',
+            "--hip-max-sa-cache-token-size",
             type=int,
             default=16 * 1024,
             help=(
                 "On-gpu cache size of sparse attention kernels. "
-                "This will be major factor to determine mask cached decoding step."
-            )
+                "This will be a major determining factor for mask-cached decoding step latency."
+            ),
         )
 
         # LoRA
@@ -681,13 +710,19 @@ class ServerArgs:
             nargs="*",
             default=None,
             action=LoRAPathAction,
-            help="The list of LoRA adapters. You can provide a list of either path in str or renamed path in the format {name}={path}",
+            help="The list of LoRA adapters. You can provide a list of either path in str or renamed path in the format {name}={path}.",
         )
         parser.add_argument(
             "--max-loras-per-batch",
             type=int,
             default=8,
-            help="Maximum number of adapters for a running batch, include base-only request",
+            help="Maximum number of adapters for a running batch, include base-only request.",
+        )
+        parser.add_argument(
+            "--lora-backend",
+            type=str,
+            default="triton",
+            help="Choose the kernel backend for multi-LoRA serving.",
         )
 
         # Kernel backend
@@ -712,12 +747,17 @@ class ServerArgs:
             default=ServerArgs.grammar_backend,
             help="Choose the backend for grammar-guided decoding.",
         )
+        parser.add_argument(
+            "--enable-flashinfer-mla",
+            action="store_true",
+            help="Enable FlashInfer MLA optimization",
+        )
 
         # Speculative decoding
         parser.add_argument(
             "--speculative-algorithm",
             type=str,
-            choices=["EAGLE"],
+            choices=["EAGLE", "NEXTN"],
             help="Speculative algorithm.",
         )
         parser.add_argument(
@@ -732,17 +772,17 @@ class ServerArgs:
             default=ServerArgs.speculative_num_steps,
         )
         parser.add_argument(
-            "--speculative-num-draft-tokens",
-            type=int,
-            help="The number of token sampled from draft model in Speculative Decoding.",
-            default=ServerArgs.speculative_num_draft_tokens,
-        )
-        parser.add_argument(
             "--speculative-eagle-topk",
             type=int,
             help="The number of token sampled from draft model in eagle2 each step.",
             choices=[1, 2, 4, 8],
             default=ServerArgs.speculative_eagle_topk,
+        )
+        parser.add_argument(
+            "--speculative-num-draft-tokens",
+            type=int,
+            help="The number of token sampled from draft model in Speculative Decoding.",
+            default=ServerArgs.speculative_num_draft_tokens,
         )
 
         # Double Sparsity
@@ -804,6 +844,11 @@ class ServerArgs:
             help="Disable cuda graph when padding is needed. Still uses cuda graph when padding is not needed.",
         )
         parser.add_argument(
+            "--enable-nccl-nvls",
+            action="store_true",
+            help="Enable NCCL NVLS for prefill heavy requests when available.",
+        )
+        parser.add_argument(
             "--disable-outlines-disk-cache",
             action="store_true",
             help="Disable disk cache of outlines to avoid possible crashes related to file system or high concurrency.",
@@ -816,7 +861,7 @@ class ServerArgs:
         parser.add_argument(
             "--disable-mla",
             action="store_true",
-            help="Disable Multi-head Latent Attention (MLA) for DeepSeek-V2.",
+            help="Disable Multi-head Latent Attention (MLA) for DeepSeek V2/V3/R1 series models.",
         )
         parser.add_argument(
             "--disable-overlap-schedule",
@@ -912,17 +957,47 @@ class ServerArgs:
             action="store_true",
             help="Allow automatically truncating requests that exceed the maximum input length instead of returning an error.",
         )
+        parser.add_argument(
+            "--enable-custom-logit-processor",
+            action="store_true",
+            help="Enable users to pass custom logit processors to the server (disabled by default for security)",
+        )
+        parser.add_argument(
+            "--return-hidden-states",
+            action="store_true",
+            help="Return hidden states in the response.",
+        )
+        parser.add_argument(
+            "--tool-call-parser",
+            type=str,
+            choices=["qwen25", "mistral", "llama3"],
+            default=ServerArgs.tool_call_parser,
+            help="Specify the parser for handling tool-call interactions. Options include: 'qwen25', 'mistral', and 'llama3'.",
+        )
+        parser.add_argument(
+            "--enable-hierarchical-cache",
+            action="store_true",
+            help="Enable hierarchical cache",
+        )
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
         args.tp_size = args.tensor_parallel_size
         args.dp_size = args.data_parallel_size
         args.ep_size = args.expert_parallel_size
+
+        if args.enable_hip_attention:
+            from hip_attn.v1_2 import HiPAttentionConfig
+
+            args.hip_attention_config = HiPAttentionConfig(
+                json_or_path=args.hip_attention_config
+            )
+
         attrs = [attr.name for attr in dataclasses.fields(cls)]
         return cls(**{attr: getattr(args, attr) for attr in attrs})
 
     def url(self):
-        if is_ipv6(self.host):
+        if is_valid_ipv6_address(self.host):
             return f"http://[{self.host}]:{self.port}"
         else:
             return f"http://{self.host}:{self.port}"

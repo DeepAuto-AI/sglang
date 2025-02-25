@@ -16,7 +16,6 @@
 import gc
 import json
 import logging
-import os
 import time
 from typing import List, Optional, Tuple
 
@@ -33,14 +32,11 @@ from sglang.srt.distributed import (
     set_custom_all_reduce,
 )
 from sglang.srt.distributed.parallel_state import monkey_patch_vllm_parallel_state
-
-from sglang.srt.configs.device_config import DeviceConfig
-from sglang.srt.configs.load_config import LoadConfig
-from sglang.srt.configs.model_config import AttentionArch, ModelConfig
-from sglang.srt.hf_transformers_utils import update_context_length, get_context_length
-
+from sglang.srt.hf_transformers_utils import get_context_length, update_context_length
 from sglang.srt.layers.attention.double_sparsity_backend import DoubleSparseAttnBackend
 from sglang.srt.layers.attention.flashinfer_backend import FlashInferAttnBackend
+from sglang.srt.layers.attention.flashinfer_mla_backend import FlashInferMLAAttnBackend
+from sglang.srt.layers.attention.hip_radix_attention import HiPRadixAttentionBackend
 from sglang.srt.layers.attention.torch_native_backend import TorchNativeAttnBackend
 from sglang.srt.layers.attention.triton_backend import TritonAttnBackend
 from sglang.srt.layers.dp_attention import (
@@ -53,13 +49,14 @@ from sglang.srt.layers.sampler import Sampler
 from sglang.srt.layers.torchao_utils import apply_torchao_config_to_model
 from sglang.srt.lora.lora_manager import LoRAManager
 from sglang.srt.managers.schedule_batch import global_server_args_dict
+from sglang.srt.mem_cache.hip_offload_kv_pool_mha import MHATokenToHiPOffloadKVPool
 from sglang.srt.mem_cache.memory_pool import (
     DoubleSparseTokenToKVPool,
     MHATokenToKVPool,
     MLATokenToKVPool,
     ReqToTokenPool,
 )
-from sglang.srt.mem_cache.hip_offload_kv_pool_mha import MHATokenToHiPOffloadKVPool
+from sglang.srt.model_executor.cuda_graph_runner import CudaGraphRunner
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader import get_model
 from sglang.srt.server_args import ServerArgs
@@ -71,9 +68,10 @@ from sglang.srt.utils import (
     init_custom_process_group,
     is_cuda,
     is_hip,
+    monkey_patch_p2p_access_check,
     monkey_patch_vllm_gguf_config,
-    monkey_patch_vllm_p2p_access_check,
     set_cpu_offload_max_bytes,
+    set_cuda_arch,
 )
 
 logger = logging.getLogger(__name__)
@@ -117,8 +115,14 @@ class ModelRunner:
         ):
             # TODO: add MLA optimization on CPU
             if self.server_args.device != "cpu":
-                logger.info("MLA optimization is turned on. Use triton backend.")
-                self.server_args.attention_backend = "triton"
+                if server_args.enable_flashinfer_mla:
+                    logger.info(
+                        "MLA optimization is turned on. Use flashinfer mla backend."
+                    )
+                    self.server_args.attention_backend = "flashinfer_mla"
+                else:
+                    logger.info("MLA optimization is turned on. Use triton backend.")
+                    self.server_args.attention_backend = "triton"
 
         if self.server_args.enable_double_sparsity:
             logger.info(
@@ -133,6 +137,10 @@ class ModelRunner:
             self.init_double_sparsity_channel_config(
                 self.server_args.ds_heavy_channel_type
             )
+
+        elif server_args.enable_hip_attention:
+            logger.info("HIP attention is turned on.")
+            server_args.attention_backend = "hip_attention"
 
         if self.is_multimodal:
             self.mem_fraction_static *= 0.95
@@ -176,6 +184,8 @@ class ModelRunner:
                 "enable_dp_attention": server_args.enable_dp_attention,
                 "enable_ep_moe": server_args.enable_ep_moe,
                 "device": server_args.device,
+                "enable_flashinfer_mla": server_args.enable_flashinfer_mla,
+                "disable_radix_cache": server_args.disable_radix_cache,
             }
         )
 
@@ -193,9 +203,12 @@ class ModelRunner:
         self.load_model()
 
         # Apply torchao quantization
-        apply_torchao_config_to_model(
-            self.model, global_server_args_dict["torchao_config"]
-        )
+        torchao_applied = getattr(self.model, "torchao_applied", False)
+        # In layered loading, torchao may have been applied
+        if not torchao_applied:
+            apply_torchao_config_to_model(
+                self.model, global_server_args_dict["torchao_config"]
+            )
 
         # Apply torch TP if the model supports it
         supports_torch_tp = getattr(self.model, "supports_torch_tp", False)
@@ -223,7 +236,7 @@ class ModelRunner:
 
     def init_torch_distributed(self):
         logger.info("Init torch distributed begin.")
-        # Init torch distributed
+
         torch.get_device_module(self.device).set_device(self.gpu_id)
         if self.device == "cuda":
             backend = "nccl"
@@ -237,7 +250,8 @@ class ModelRunner:
             backend = "gloo"
 
         if not self.server_args.enable_p2p_check:
-            monkey_patch_vllm_p2p_access_check(self.gpu_id)
+            monkey_patch_p2p_access_check()
+
         if self.server_args.dist_init_addr:
             dist_init_method = f"tcp://{self.server_args.dist_init_addr}"
         else:
@@ -270,7 +284,7 @@ class ModelRunner:
         # Check memory for tensor parallelism
         if self.tp_size > 1:
             local_gpu_memory = get_available_gpu_memory(self.device, self.gpu_id)
-            if min_per_gpu_memory < local_gpu_memory * 0.9:
+            if min_per_gpu_memory < local_gpu_memory * 0.09:
                 raise ValueError(
                     "The memory capacity is unbalanced. Some GPUs may be occupied by other processes."
                 )
@@ -295,6 +309,8 @@ class ModelRunner:
                 if torch.cuda.get_device_capability()[1] < 5:
                     raise RuntimeError("SGLang only supports sm75 and above.")
 
+        set_cuda_arch()
+
         # Prepare the model config
         self.load_config = LoadConfig(
             load_format=self.server_args.load_format,
@@ -307,10 +323,14 @@ class ModelRunner:
             orig_context_length = get_context_length(self.model_config.hf_config)
             if self.server_args.context_length is None:
                 self.server_args.context_length = orig_context_length
-            update_context_length(self.model_config.hf_config, self.server_args.context_length)
+            update_context_length(
+                self.model_config.hf_config, self.server_args.context_length
+            )
             self.model_config.hf_config.orig_context_len = orig_context_length
-            logger.info(f"Update model config for HiP context extension "
-                        f"{orig_context_length} -> {self.server_args.context_length}.")
+            logger.info(
+                f"Update model config for HiP context extension "
+                f"{orig_context_length} -> {self.server_args.context_length}."
+            )
 
         # Load the model
         # Remove monkey_patch when linear.py quant remove dependencies with vllm
@@ -542,6 +562,7 @@ class ModelRunner:
             max_loras_per_batch=self.server_args.max_loras_per_batch,
             load_config=self.load_config,
             dtype=self.dtype,
+            lora_backend=self.server_args.lora_backend,
         )
         logger.info("LoRA manager ready.")
 
@@ -621,10 +642,14 @@ class ModelRunner:
                 logging.warning(
                     f"max_total_tokens={max_total_tokens} is larger than the profiled value "
                     f"{self.max_total_num_tokens}. "
-                    # f"Use the given value instead."
+                    f"Use the profiled value instead."
                 )
-            # self.max_total_num_tokens = min(self.max_total_num_tokens, max_total_tokens)
-            self.max_total_num_tokens = max_total_tokens
+            if self.server_args.enable_hip_offload:
+                self.max_total_num_tokens = max_total_tokens
+            else:
+                self.max_total_num_tokens = min(
+                    self.max_total_num_tokens, max_total_tokens
+                )
 
         if self.max_total_num_tokens <= 0:
             raise RuntimeError(
@@ -635,7 +660,6 @@ class ModelRunner:
             size=max_num_reqs + 1,
             max_context_len=self.model_config.context_len + 4,
             device=self.device,
-            use_records=False,
             enable_memory_saver=self.server_args.enable_memory_saver,
         )
         if (
@@ -662,7 +686,10 @@ class ModelRunner:
                 heavy_channel_num=self.server_args.ds_heavy_channel_num,
                 enable_memory_saver=self.server_args.enable_memory_saver,
             )
-        elif self.server_args.enable_hip_attention and self.server_args.enable_hip_offload:
+        elif (
+            self.server_args.enable_hip_attention
+            and self.server_args.enable_hip_offload
+        ):
             self.token_to_kv_pool = MHATokenToHiPOffloadKVPool(
                 max_token_size=self.max_total_num_tokens,
                 max_mask_cache_token_size=self.server_args.hip_max_mask_cache_token_size,
@@ -672,7 +699,7 @@ class ModelRunner:
                 head_dim=self.model_config.head_dim,
                 layer_num=self.model_config.num_hidden_layers,
                 device=torch.device(self.gpu_id),
-                hip_config=self.hip_attention_config,
+                hip_config=self.server_args.hip_attention_config,
             )
         else:
             self.token_to_kv_pool = MHATokenToKVPool(
@@ -683,6 +710,21 @@ class ModelRunner:
                 layer_num=self.model_config.num_hidden_layers,
                 device=self.device,
                 enable_memory_saver=self.server_args.enable_memory_saver,
+            )
+
+        self.hip_metadata_cache_pool = None
+        if self.server_args.enable_hip_attention:
+            from hip_attn.v1_2 import HiPMetadataCachePool
+
+            self.hip_metadata_cache_pool = HiPMetadataCachePool(
+                self.max_total_num_tokens,
+                query_head_num=(
+                    self.model_config.num_attention_heads // self.server_args.tp_size
+                ),
+                layer_num=self.model_config.num_hidden_layers,
+                context_length=self.model_config.context_len,
+                device=self.device,
+                hip_config=self.server_args.hip_attention_config,
             )
 
         logger.info(
@@ -701,7 +743,9 @@ class ModelRunner:
 
     def init_attention_backend(self):
         """Init attention kernel backend."""
-        if self.server_args.attention_backend == "flashinfer":
+        if self.server_args.enable_hip_attention:
+            self.attn_backend = HiPRadixAttentionBackend(self)
+        elif self.server_args.attention_backend == "flashinfer":
             self.attn_backend = FlashInferAttnBackend(self)
         elif self.server_args.attention_backend == "triton":
             assert self.sliding_window_size is None, (
@@ -718,6 +762,8 @@ class ModelRunner:
                 self.attn_backend = TritonAttnBackend(self)
         elif self.server_args.attention_backend == "torch_native":
             self.attn_backend = TorchNativeAttnBackend(self)
+        elif self.server_args.attention_backend == "flashinfer_mla":
+            self.attn_backend = FlashInferMLAAttnBackend(self)
         else:
             raise ValueError(
                 f"Invalid attention backend: {self.server_args.attention_backend}"
@@ -742,9 +788,6 @@ class ModelRunner:
 
     def init_cuda_graphs(self):
         """Capture cuda graphs."""
-        from sglang.srt.model_executor.cuda_graph_runner import CudaGraphRunner
-        from sglang.srt.layers.attention.hip_attention import HiPCudaGraphRunner
-
         self.cuda_graph_runner = None
 
         if not self.is_generation:
@@ -755,15 +798,9 @@ class ModelRunner:
             return
 
         tic = time.time()
-        CudaGraphRunnerClass = CudaGraphRunner
-        if self.server_args.enable_hip_attention:
-            CudaGraphRunnerClass = HiPCudaGraphRunner
         logger.info("Capture cuda graph begin. This can take up to several minutes.")
-        self.cuda_graph_runner = CudaGraphRunnerClass(self)
-        logger.info(
-            f"Capture cuda graph end. Time elapsed: {time.time() - tic:.2f} s, "
-            f"avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
-        )
+        self.cuda_graph_runner = CudaGraphRunner(self)
+        logger.info(f"Capture cuda graph end. Time elapsed: {time.time() - tic:.2f} s")
 
     def apply_torch_tp(self):
         logger.info(f"Enabling torch tensor parallelism on {self.tp_size} devices.")
@@ -806,7 +843,7 @@ class ModelRunner:
             forward_batch.input_ids, forward_batch.positions, forward_batch
         )
 
-    def _forward(self, forward_batch: ForwardBatch) -> LogitsProcessorOutput:
+    def forward(self, forward_batch: ForwardBatch) -> LogitsProcessorOutput:
         if (
             forward_batch.forward_mode.is_cuda_graph()
             and self.cuda_graph_runner
@@ -823,35 +860,6 @@ class ModelRunner:
         else:
             raise ValueError(f"Invalid forward mode: {forward_batch.forward_mode}")
 
-    def forward(self, forward_batch: ForwardBatch) -> LogitsProcessorOutput:
-        require_decode_profiling = os.getenv('SRT_MODEL_RUNNER_PROFILING', '0') == '1'
-        if require_decode_profiling:
-            start_event = torch.cuda.Event(enable_timing=True)
-            start_event.record()
-        
-        result = self._forward(forward_batch)
-
-        if require_decode_profiling:
-            end_event = torch.cuda.Event(enable_timing=True)
-            end_event.record()
-            
-            end_event.synchronize()
-            elapsed = start_event.elapsed_time(end_event)
-        
-        if require_decode_profiling and (forward_batch.hip_metadata_cache_pool is not None) and forward_batch.forward_mode.is_decode():
-            cache = forward_batch.hip_metadata_cache_pool
-            statistics = cache.compute_cache_statistics(forward_batch.batch_size)
-            statistics = dict(map(lambda x: (x[0], x[1].item()), statistics.items()))
-            logger.info(
-                f'took {elapsed:.3f} ms, '
-                f'SA hit = {statistics["sa_hit_ratio"]*100:.2f}% (miss = {statistics["sa_miss"] / 1024 / 1024:.2f}M / {statistics["sa_access"] / 1024 / 1024:.2f}M), '
-                f'Mask hit = {statistics["mask_hit_ratio"] * 100:.2f}% (miss = {statistics["mask_miss"] / 1024 / 1024:.2f}M / {statistics["mask_access"] / 1024 / 1024:.2f}M)'
-            )
-        elif require_decode_profiling:
-            logger.info(f'took {elapsed:.3f} ms')
-
-        return result
-    
     def sample(
         self, logits_output: LogitsProcessorOutput, forward_batch: ForwardBatch
     ) -> torch.Tensor:

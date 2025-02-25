@@ -12,15 +12,13 @@
 # limitations under the License.
 # ==============================================================================
 """Radix attention."""
-from __future__ import annotations
+from typing import Optional
 
-from typing import Optional, TYPE_CHECKING
-
-import torch
 from torch import nn
 
+from sglang.srt.layers.rotary_embedding import RotaryEmbedding
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
-from sglang.srt.layers.rotary_embedding import get_rope, RotaryEmbedding
+
 
 class RadixAttention(nn.Module):
     """
@@ -53,8 +51,8 @@ class RadixAttention(nn.Module):
         self.logit_cap = logit_cap
         self.sliding_window_size = sliding_window_size or -1
         self.is_cross_attention = is_cross_attention
-        self.k_scale = 1.0
-        self.v_scale = 1.0
+        self.k_scale = None
+        self.v_scale = None
 
         self.orig_context_len = orig_context_len
 
@@ -64,7 +62,7 @@ class RadixAttention(nn.Module):
                 _, self.rope_cos, self.rope_sin = rope
             else:
                 assert isinstance(rope, RotaryEmbedding)
-                if hasattr(rope, 'repeated_cos_sin_cache'):
+                if hasattr(rope, "repeated_cos_sin_cache"):
                     self.rope_cos, self.rope_sin = rope.repeated_cos_sin_cache
                 else:
                     cos_sin = rope.cos_sin_cache

@@ -38,15 +38,16 @@ from sglang.srt.layers.logits_processor import LogitsProcessor, LogitsProcessorO
 from sglang.srt.layers.pooler import Pooler, PoolingType
 from sglang.srt.layers.quantization.base_config import QuantizationConfig
 from sglang.srt.layers.radix_attention import RadixAttention
-from sglang.srt.layers.rotary_embedding import get_rope, RotaryEmbedding
+from sglang.srt.layers.rotary_embedding import get_rope
 from sglang.srt.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import (
     default_weight_loader,
     kv_cache_scales_loader,
+    maybe_remap_kv_scale_name,
 )
 from sglang.srt.utils import make_layers_with_previous_layer
 from sglang.utils import get_exception_traceback
@@ -170,7 +171,9 @@ class LlamaAttention(nn.Module):
             self.scaling,
             num_kv_heads=self.num_kv_heads,
             layer_id=layer_id,
-            orig_context_len=getattr(config, "orig_context_len", max_position_embeddings),
+            orig_context_len=getattr(
+                config, "orig_context_len", max_position_embeddings
+            ),
             rope=self.rotary_emb,
         )
 
@@ -183,10 +186,10 @@ class LlamaAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        # FIXME(geon): find better way to detect if HIP is enabled
-        if (
-            (forward_batch.hip_metadata_cache_pool is None) or\
-            (not forward_batch.hip_metadata_cache_pool.hip_config.using_extend)
+        # RoPE is applied inside the attention kernel in HiP Attention
+        if not (
+            forward_batch.hip_metadata_cache_pool is not None
+            and forward_batch.hip_metadata_cache_pool.hip_config.using_extend
         ):
             q, k = self.rotary_emb(positions, q, k)
 
@@ -234,7 +237,9 @@ class LlamaDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             bias=attention_bias,
-            previous_layer=previous_layer.self_attn if previous_layer is not None else None,
+            previous_layer=(
+                previous_layer.self_attn if previous_layer is not None else None
+            ),
         )
         self.mlp = LlamaMLP(
             hidden_size=self.hidden_size,
@@ -291,9 +296,9 @@ class LlamaModel(nn.Module):
         self.layers = make_layers_with_previous_layer(
             config.num_hidden_layers,
             lambda idx, prefix, previous_layer: LlamaDecoderLayer(
-                config=config, 
-                quant_config=quant_config, 
-                layer_id=idx, 
+                config=config,
+                quant_config=quant_config,
+                layer_id=idx,
                 prefix=prefix,
                 previous_layer=previous_layer,
             ),
@@ -327,9 +332,9 @@ class LlamaModel(nn.Module):
             )
             forward_batch.on_layer_end(i)
         forward_batch.on_model_end()
-        
+
         hidden_states, _ = self.norm(hidden_states, residual)
-        
+
         return hidden_states
 
     # If this function is called, it should always initialize KV cache scale
@@ -484,6 +489,13 @@ class LlamaForCausalLM(nn.Module):
                 continue
             if name.startswith("model.vision_tower") and name not in params_dict:
                 continue
+            if self.config.tie_word_embeddings and "lm_head.weight" in name:
+                continue
+            # Handle FP8 kv-scale remapping
+            if "scale" in name:
+                name = maybe_remap_kv_scale_name(name, params_dict)
+                if name is None:
+                    continue
 
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 if weight_name not in name:
@@ -503,9 +515,14 @@ class LlamaForCausalLM(nn.Module):
                 # Skip loading kv_scale from ckpts towards new design.
                 if name.endswith(".kv_scale") and name not in params_dict:
                     continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
+                if name in params_dict.keys():
+                    param = params_dict[name]
+                    weight_loader = getattr(
+                        param, "weight_loader", default_weight_loader
+                    )
+                    weight_loader(param, loaded_weight)
+                else:
+                    logger.warning(f"Parameter {name} not found in params_dict")
 
     def get_weights_by_name(
         self, name: str, truncate_size: int = 100, tp_size: int = 1

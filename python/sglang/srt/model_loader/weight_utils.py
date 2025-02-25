@@ -27,6 +27,7 @@ import huggingface_hub.constants
 import numpy as np
 import torch
 from huggingface_hub import HfFileSystem, hf_hub_download, snapshot_download
+from pydantic import BaseModel, ConfigDict, ValidationInfo, model_validator
 from safetensors.torch import load_file, safe_open, save_file
 from tqdm.auto import tqdm
 
@@ -403,8 +404,13 @@ def np_cache_weights_iterator(
 
 def safetensors_weights_iterator(
     hf_weights_files: List[str],
+    is_all_weights_sharded: bool = False,
 ) -> Generator[Tuple[str, torch.Tensor], None, None]:
-    """Iterate over the weights in the model safetensor files."""
+    """Iterate over the weights in the model safetensor files.
+
+    If is_all_weights_sharded is True, it uses more optimize read by reading an
+    entire file instead of reading each tensor one by one.
+    """
     enable_tqdm = (
         not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0
     )
@@ -414,9 +420,14 @@ def safetensors_weights_iterator(
         disable=not enable_tqdm,
         bar_format=_BAR_FORMAT,
     ):
-        with safe_open(st_file, framework="pt") as f:
-            for name in f.keys():  # noqa: SIM118
-                param = f.get_tensor(name)
+        if not is_all_weights_sharded:
+            with safe_open(st_file, framework="pt") as f:
+                for name in f.keys():  # noqa: SIM118
+                    param = f.get_tensor(name)
+                    yield name, param
+        else:
+            result = load_file(st_file, device="cpu")
+            for name, param in result.items():
                 yield name, param
 
 
@@ -633,9 +644,20 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
         return remapped_name
 
     possible_scale_names = [".k_scale", ".v_scale"]
+    modelopt_scale_names = [".self_attn.k_proj.k_scale", ".self_attn.v_proj.v_scale"]
     for scale_name in possible_scale_names:
         if name.endswith(scale_name):
-            remapped_name = name.replace(scale_name, f".attn{scale_name}")
+            # Check and remap the name based on modelopt scale names
+            if any(
+                modelopt_scale_name in name
+                for modelopt_scale_name in modelopt_scale_names
+            ):
+                remapped_name = name.replace(
+                    f".self_attn.{scale_name[1]}_proj{scale_name}",
+                    f".self_attn.attn{scale_name}",
+                )
+            else:
+                remapped_name = name.replace(scale_name, f".attn{scale_name}")
             if remapped_name not in params_dict:
                 print_warning_once(
                     f"Found {scale_name} in the checkpoint (e.g. {name}), "
@@ -648,6 +670,81 @@ def maybe_remap_kv_scale_name(name: str, params_dict: dict) -> Optional[str]:
 
     # If there were no matches, return the untouched param name
     return name
+
+
+# Adapted from https://github.com/vllm-project/vllm/blob/68ad4e3a8d8a66fb2a43be57471ee13a8bec4ec0/vllm/model_executor/layers/quantization/schema.py
+class KVCacheQuantSchema(BaseModel):
+    dtype: str
+    # Each key is a TP rank. Each value is a dictionary mapping a TP rank's
+    # layer indices to their per-tensor KV cache scaling factor.
+    # TODO: Consider pulling this and its validation methods out into its
+    # own schema class (tricky as its members are variable)
+    scaling_factor: Dict[int, Dict[int, float]]
+
+    @model_validator(mode="after")
+    def check_is_fp8(self) -> "KVCacheQuantSchema":
+        assert self.dtype == "float8_e4m3fn", (
+            "Loaded scaling factors intended for KV cache dtype = "
+            f"{self.dtype} rather than float8_e4m3fn!"
+        )
+        return self
+
+    @model_validator(mode="after")
+    def check_tp_ranks(self, info: ValidationInfo) -> "KVCacheQuantSchema":
+        context = info.context
+        if context:
+            tp_size = context["tp_size"]
+            num_hidden_layers = context["num_hidden_layers"]
+            assert len(self.scaling_factor) == tp_size, (
+                f"Loaded dictionary has TP size {len(self.scaling_factor)} "
+                f"but LLM engine is currently running with TP size {tp_size}."
+            )
+            for tp_rank, layer_maps in self.scaling_factor.items():
+                assert len(layer_maps) == num_hidden_layers, (
+                    f"KV cache scales map for TP rank {tp_rank} is malformed. "
+                    f"Expected {num_hidden_layers} layers, got "
+                    f"{len(layer_maps)}."
+                )
+            for i in range(tp_size):
+                assert (
+                    i in self.scaling_factor
+                ), f"KV cache scales map for TP rank {i} not found."
+        return self
+
+    @model_validator(mode="after")
+    def check_current_rank(self, info: ValidationInfo) -> "KVCacheQuantSchema":
+        context = info.context
+        if context:
+            tp_rank = context["tp_rank"]
+            num_hidden_layers = context["num_hidden_layers"]
+            layer_scales_map = self.scaling_factor[tp_rank]
+            for i in range(num_hidden_layers):
+                assert i in layer_scales_map, (
+                    f"Could not find KV cache scales for layer {i} in "
+                    f"TP rank {tp_rank}."
+                )
+        return self
+
+
+class QuantParamSchema(BaseModel):
+    # TODO: Generalize and extend with more fields
+    # (e.g. weights/activations params) once functionality is enabled
+    model_config = ConfigDict(protected_namespaces=())
+    model_type: Optional[str]
+    kv_cache: KVCacheQuantSchema
+
+    @model_validator(mode="after")
+    def check_model_type(self, info: ValidationInfo) -> "QuantParamSchema":
+        context = info.context
+        if context:
+            model_type = context.get("model_type", None)
+            if model_type is not None:
+                assert model_type == self.model_type, (
+                    f"Model type is {model_type} but loaded "
+                    f"scaling factors belonging to different "
+                    f"model type {self.model_type}!"
+                )
+        return self
 
 
 def kv_cache_scales_loader(
@@ -681,7 +778,7 @@ def kv_cache_scales_loader(
     except json.JSONDecodeError:
         logger.error("Error decoding JSON in file '%s'.", filename)
     except Exception:
-        logger.exception("An error occurred while reading '%s'.", filename)
+        logger.error("An error occurred while reading '%s'.", filename)
     # This section is reached if and only if any of the excepts are hit
     # Return an empty iterable (list) => no KV cache scales are loaded
     # which ultimately defaults to 1.0 scales

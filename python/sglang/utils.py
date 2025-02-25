@@ -1,26 +1,30 @@
 """Common utilities"""
 
 import base64
-import gc
 import importlib
 import json
 import logging
 import os
+import random
 import signal
+import socket
 import subprocess
 import sys
 import time
 import traceback
 import urllib.request
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from io import BytesIO
 from json import dumps
-from typing import Optional, Union
+from typing import Any, Callable, List, Optional, Tuple, Type, Union
 
 import numpy as np
 import requests
 from IPython.display import HTML, display
 from tqdm import tqdm
+
+from sglang.srt.utils import kill_process_tree
 
 logger = logging.getLogger(__name__)
 
@@ -307,20 +311,91 @@ def download_and_cache_file(url: str, filename: Optional[str] = None):
     return filename
 
 
+def is_in_ci():
+    from sglang.test.test_utils import is_in_ci
+
+    return is_in_ci()
+
+
+def print_highlight(html_content: str):
+    if is_in_ci():
+        html_content = str(html_content).replace("\n", "<br>")
+        display(HTML(f"<strong style='color: #00008B;'>{html_content}</strong>"))
+    else:
+        print(html_content)
+
+
+process_socket_map = weakref.WeakKeyDictionary()
+
+
+def reserve_port(host, start=30000, end=40000):
+    """
+    Reserve an available port by trying to bind a socket.
+    Returns a tuple (port, lock_socket) where `lock_socket` is kept open to hold the lock.
+    """
+    candidates = list(range(start, end))
+    random.shuffle(candidates)
+
+    for port in candidates:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            # Attempt to bind to the port on localhost
+            sock.bind((host, port))
+            return port, sock
+        except socket.error:
+            sock.close()  # Failed to bind, try next port
+            continue
+    raise RuntimeError("No free port available.")
+
+
+def release_port(lock_socket):
+    """
+    Release the reserved port by closing the lock socket.
+    """
+    try:
+        lock_socket.close()
+    except Exception as e:
+        print(f"Error closing socket: {e}")
+
+
 def execute_shell_command(command: str) -> subprocess.Popen:
     """
-    Execute a shell command and return the process handle
-
-    Args:
-        command: Shell command as a string (can include \\ line continuations)
-    Returns:
-        subprocess.Popen: Process handle
+    Execute a shell command and return its process handle.
     """
-    # Replace \ newline with space and split
     command = command.replace("\\\n", " ").replace("\\", " ")
     parts = command.split()
-
     return subprocess.Popen(parts, text=True, stderr=subprocess.STDOUT)
+
+
+def launch_server_cmd(command: str, host: str = "0.0.0.0", port: int = None):
+    """
+    Launch the server using the given command.
+    If no port is specified, a free port is reserved.
+    """
+    if port is None:
+        port, lock_socket = reserve_port(host)
+    else:
+        lock_socket = None
+
+    full_command = f"{command} --port {port}"
+    process = execute_shell_command(full_command)
+
+    if lock_socket is not None:
+        process_socket_map[process] = lock_socket
+
+    return process, port
+
+
+def terminate_process(process):
+    """
+    Terminate the process and automatically release the reserved port.
+    """
+    kill_process_tree(process.pid)
+
+    lock_socket = process_socket_map.pop(process, None)
+    if lock_socket is not None:
+        release_port(lock_socket)
 
 
 def wait_for_server(base_url: str, timeout: int = None) -> None:
@@ -344,6 +419,7 @@ def wait_for_server(base_url: str, timeout: int = None) -> None:
                     NOTE: Typically, the server runs in a separate terminal.
                     In this notebook, we run the server and notebook code together, so their outputs are combined.
                     To improve clarity, the server logs are displayed in the original black color, while the notebook outputs are highlighted in blue.
+                    We are running those notebooks in a CI parallel environment, so the throughput is not representative of the actual performance.
                     """
                 )
                 break
@@ -354,28 +430,54 @@ def wait_for_server(base_url: str, timeout: int = None) -> None:
             time.sleep(1)
 
 
-def terminate_process(process):
-    from sglang.srt.utils import kill_process_tree
+class TypeBasedDispatcher:
+    def __init__(self, mapping: List[Tuple[Type, Callable]]):
+        self._mapping = mapping
 
-    kill_process_tree(process.pid)
+    def __call__(self, obj: Any):
+        for ty, fn in self._mapping:
+            if isinstance(obj, ty):
+                return fn(obj)
+        raise ValueError(f"Invalid object: {obj}")
 
 
-def print_highlight(html_content: str):
-    html_content = str(html_content).replace("\n", "<br>")
-    display(HTML(f"<strong style='color: #00008B;'>{html_content}</strong>"))
-
-import sys
-import pdb
-
-class ForkedPdb(pdb.Pdb):
+def trim_overlap(existing_text, new_chunk):
     """
-    PDB Subclass for debugging multi-processed code
-    Suggested in: https://stackoverflow.com/questions/4716533/how-to-attach-debugger-to-a-python-subproccess
+    Finds the largest suffix of 'existing_text' that is a prefix of 'new_chunk'
+    and removes that overlap from the start of 'new_chunk'.
     """
-    def interaction(self, *args, **kwargs):
-        _stdin = sys.stdin
-        try:
-            sys.stdin = open('/dev/stdin')
-            pdb.Pdb.interaction(self, *args, **kwargs)
-        finally:
-            sys.stdin = _stdin
+    max_overlap = 0
+    max_possible = min(len(existing_text), len(new_chunk))
+    for i in range(max_possible, 0, -1):
+        if existing_text.endswith(new_chunk[:i]):
+            max_overlap = i
+            break
+    return new_chunk[max_overlap:]
+
+
+def stream_and_merge(llm, prompt, sampling_params):
+    """
+    1) Streams the text,
+    2) Removes chunk overlaps,
+    3) Returns the merged text.
+    """
+    final_text = ""
+    for chunk in llm.generate(prompt, sampling_params, stream=True):
+        chunk_text = chunk["text"]
+        cleaned_chunk = trim_overlap(final_text, chunk_text)
+        final_text += cleaned_chunk
+    return final_text
+
+
+async def async_stream_and_merge(llm, prompt, sampling_params):
+    """
+    Streams tokens asynchronously, removes chunk overlaps,
+    and yields the cleaned chunk in real time for printing.
+    """
+    final_text = ""
+    generator = await llm.async_generate(prompt, sampling_params, stream=True)
+    async for chunk in generator:
+        chunk_text = chunk["text"]
+        cleaned_chunk = trim_overlap(final_text, chunk_text)
+        final_text += cleaned_chunk
+        yield cleaned_chunk  # yield the non-overlapping portion
