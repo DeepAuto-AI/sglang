@@ -1178,9 +1178,9 @@ def set_gpu_proc_affinity(
 
     if psutil.cpu_count() != psutil.cpu_count(logical=False):
         # HT on
-        upper_cpu_ids = [id for id in range(start_cpu_id, end_cpu_id)]
-        lower_cpu_ids = [id + total_pcores for id in range(start_cpu_id, end_cpu_id)]
-        bind_cpu_ids = list(itertools.chain(upper_cpu_ids, lower_cpu_ids))
+        lower_cpu_ids = [id for id in range(start_cpu_id, end_cpu_id)]
+        upper_cpu_ids = [id + total_pcores for id in range(start_cpu_id, end_cpu_id)]
+        bind_cpu_ids = list(itertools.chain(lower_cpu_ids, upper_cpu_ids))
     else:
         # HT off
         bind_cpu_ids = [id for id in range(start_cpu_id, end_cpu_id)]
@@ -1313,7 +1313,7 @@ def debug_timing(func):
             tic.record()
             result = func(*args, **kwargs)
             toc.record()
-            torch.cuda.synchronize()  # Ensure all CUDA operations are complete
+            toc.synchronize()  # Wait for the function to complete without synchronizing all ops on the GPU
             elapsed = tic.elapsed_time(toc)
             indices = kwargs.get("indices", args[1] if len(args) > 1 else None)
             num_tokens = len(indices) if indices is not None else 0
@@ -1468,3 +1468,10 @@ def launch_dummy_health_check_server(host, port):
         timeout_keep_alive=5,
         loop="uvloop",
     )
+
+
+def set_cuda_arch():
+    if is_flashinfer_available():
+        capability = torch.cuda.get_device_capability()
+        arch = f"{capability[0]}.{capability[1]}"
+        os.environ["TORCH_CUDA_ARCH_LIST"] = f"{arch}{'+PTX' if arch == '9.0' else ''}"
