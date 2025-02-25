@@ -297,7 +297,9 @@ class ForwardBatch:
                 batch.hip_metadata_cached_stages < 0
             ):
                 ret.hip_metadata_cache_pool.reset_decode_phase()
-            ret.hip_metadata_cached_stages = batch.hip_metadata_cached_stages
+                ret.hip_metadata_cached_stages = 0
+            else:
+                ret.hip_metadata_cached_stages = batch.hip_metadata_cached_stages
 
         # Init lora information
         if model_runner.server_args.lora_paths is not None:
