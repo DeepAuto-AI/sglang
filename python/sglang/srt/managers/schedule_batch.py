@@ -50,7 +50,7 @@ from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import ServerArgs
 
 if TYPE_CHECKING:
-    from hip.models.hip_attention.gen3 import HiPAttentionConfig, HiPMaskRefreshState
+    from hip_attn.v1_2 import HiPAttentionConfig, HiPMaskRefreshState
 
     from sglang.srt.speculative.spec_info import SpecInfo, SpeculativeAlgorithm
 
@@ -632,7 +632,7 @@ class ScheduleBatch:
     ):
         hip_mask_refresh_state = None
         if hip_attention_config is not None:
-            from hip.models.hip_attention.gen3 import HiPMaskRefreshState
+            from hip_attn.v1_2 import HiPMaskRefreshState
 
             # For keeping track of HiP attention mask refresh cycles
             hip_mask_refresh_state = HiPMaskRefreshState(hip_attention_config)

@@ -11,7 +11,7 @@ from sglang.srt.mem_cache.memory_pool import BaseTokenToKVPool
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 
 if TYPE_CHECKING:
-    from hip.models.hip_attention.gen3 import HiPAttentionConfig, HiPOffloadCache
+    from hip_attn.v1_2 import HiPAttentionConfig, HiPOffloadCache
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +34,7 @@ class MHATokenToHiPOffloadKVPool(BaseTokenToKVPool):
         assert isinstance(device, torch.device)
         assert device.index is not None
 
-        from hip.models.hip_attention.gen3 import HiPModelOffloadCache
+        from hip_attn.v1_2 import HiPModelOffloadCache
 
         self.offload_cache = HiPModelOffloadCache(
             max_token_size=max_token_size,

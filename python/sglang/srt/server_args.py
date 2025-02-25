@@ -37,7 +37,7 @@ from sglang.srt.utils import (
 )
 
 if TYPE_CHECKING:
-    from hip.models.hip_attention.gen3 import HiPAttentionConfig
+    from hip_attn.v1_2 import HiPAttentionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -987,7 +987,7 @@ class ServerArgs:
         args.ep_size = args.expert_parallel_size
 
         if args.enable_hip_attention:
-            from hip.models.hip_attention.gen3 import HiPAttentionConfig
+            from hip_attn.v1_2 import HiPAttentionConfig
 
             args.hip_attention_config = HiPAttentionConfig(
                 json_or_path=args.hip_attention_config

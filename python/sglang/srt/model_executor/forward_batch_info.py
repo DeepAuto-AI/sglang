@@ -41,7 +41,7 @@ from sglang.srt.layers.rotary_embedding import MRotaryEmbedding
 from sglang.srt.utils import get_compiler_backend
 
 if TYPE_CHECKING:
-    from hip.models.hip_attention.gen3 import HiPMetadataCachePool
+    from hip_attn.v1_2 import HiPMetadataCachePool
 
     from sglang.srt.layers.attention import AttentionBackend
     from sglang.srt.managers.schedule_batch import ImageInputs, ModelWorkerBatch
