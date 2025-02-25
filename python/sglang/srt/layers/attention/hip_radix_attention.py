@@ -40,6 +40,8 @@ class HiPRadixAttentionBackend(AttentionBackend):
 
         self.max_context_len = model_runner.model_config.context_len
 
+        self.tp_rank = model_runner.tp_rank
+
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         pass
 
@@ -194,14 +196,16 @@ class HiPRadixAttentionBackend(AttentionBackend):
             else forward_batch.encoder_out_cache_loc
         )
 
-        metadata = None
-        if forward_batch.hip_metadata_cached_stages != 0:
-            metadata = forward_batch.hip_metadata_cache_pool.get_hip_metadata_cache(
-                layer.layer_id,
-                q.shape[0],
-                forward_batch.batch_size,
-                forward_batch.hip_metadata_cached_stages,
-            )
+        metadata = forward_batch.hip_metadata_cache_pool.get_hip_metadata_cache(
+            layer.layer_id,
+            q.shape[0],
+            forward_batch.batch_size,
+            (
+                None
+                if forward_batch.hip_metadata_cached_stages is None
+                else max(0, forward_batch.hip_metadata_cached_stages)
+            ),
+        )
 
         if not self.is_offload_enabled:
             if k is not None:
@@ -254,6 +258,7 @@ class HiPRadixAttentionBackend(AttentionBackend):
                 if self.is_offload_enabled
                 else None
             ),
+            is_decode=True,
         )
 
         forward_batch.hip_metadata_cache_pool.set_hip_metadata_cache(

@@ -284,7 +284,7 @@ class ModelRunner:
         # Check memory for tensor parallelism
         if self.tp_size > 1:
             local_gpu_memory = get_available_gpu_memory(self.device, self.gpu_id)
-            if min_per_gpu_memory < local_gpu_memory * 0.9:
+            if min_per_gpu_memory < local_gpu_memory * 0.09:
                 raise ValueError(
                     "The memory capacity is unbalanced. Some GPUs may be occupied by other processes."
                 )
@@ -644,7 +644,12 @@ class ModelRunner:
                     f"{self.max_total_num_tokens}. "
                     f"Use the profiled value instead."
                 )
-            self.max_total_num_tokens = min(self.max_total_num_tokens, max_total_tokens)
+            if self.server_args.enable_hip_offload:
+                self.max_total_num_tokens = max_total_tokens
+            else:
+                self.max_total_num_tokens = min(
+                    self.max_total_num_tokens, max_total_tokens
+                )
 
         if self.max_total_num_tokens <= 0:
             raise RuntimeError(

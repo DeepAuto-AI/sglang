@@ -170,7 +170,7 @@ class Qwen2Attention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
 
-        # FIXME(geon): find better way to detect if HIP is enabled
+        # RoPE is applied inside the attention kernel in HiP Attention
         if (forward_batch.hip_metadata_cache_pool is None) or (
             not forward_batch.hip_metadata_cache_pool.hip_config.using_extend
         ):
