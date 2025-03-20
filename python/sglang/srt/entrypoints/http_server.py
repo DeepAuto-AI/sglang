@@ -605,6 +605,10 @@ def _wait_and_warmup(server_args, pipe_finish_writer, image_token_text):
             ] += "\n\nThe passkey is $000310$. Remember, the passkey is $000310$.\n\n"
             json_data["text"] += filler * (target_length // 35)
             json_data["text"] += "What was the passkey? The passkey is"
+            json_data["sampling_params"]["min_new_tokens"] = 128
+            json_data["sampling_params"]["max_new_tokens"] = max(
+                json_data["sampling_params"]["max_new_tokens"], 128
+            )
 
     try:
         for _ in range(server_args.dp_size):
