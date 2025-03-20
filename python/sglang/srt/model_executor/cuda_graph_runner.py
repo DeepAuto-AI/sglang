@@ -175,7 +175,6 @@ class CudaGraphRunner:
 
         # Batch sizes to capture
         self.capture_bs, self.compile_bs = get_batch_sizes_to_capture(model_runner)
-        print(self.capture_bs)
         self.capture_forward_mode = ForwardMode.DECODE
         self.num_tokens_per_bs = 1
         if model_runner.spec_algorithm.is_eagle():
