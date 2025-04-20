@@ -172,7 +172,7 @@ class ServerArgs:
     disable_outlines_disk_cache: bool = False
     disable_custom_all_reduce: bool = False
     disable_mla: bool = False
-    enable_llama4_multimodal: Optional[bool] = None
+    enable_llama4_multimodal: Optional[bool] = False
     disable_overlap_schedule: bool = False
     enable_mixed_chunk: bool = False
     enable_dp_attention: bool = False
