@@ -158,8 +158,11 @@ class VisionAttention(nn.Module):
             # [b, s, head, head_size] --> [b * s, head, head_size]
             q, k, v = [rearrange(x, "b s ... -> (b s) ...") for x in [q, k, v]]
 
-        output = self.qkv_backend.forward(q, k, v, bsz, cu_seqlens, attention_mask)
-
+        if isinstance(self.qkv_backend, VisionSdpaAttention):
+            output = self.qkv_backend.forward(q, k, v, bsz, cu_seqlens, attention_mask)
+        else:
+            output = self.qkv_backend.forward(q, k, v, bsz, cu_seqlens)
+        
         if self.use_qkv_parallel:
             # [b * s, h, head_size] --> [b, s, h * head_size]
             output = rearrange(output, "(b s) ... h d -> b s ... (h d)", b=bsz)
@@ -359,8 +362,8 @@ class VisionTritonAttention(nn.Module):
             k,
             v,
             output,
-            cu_seqlens.cuda(),
-            seq_lens.cuda(),
+            cu_seqlens.to(q.device),
+            seq_lens.to(q.device),
             max_seqlen,
             is_causal=False,
         )

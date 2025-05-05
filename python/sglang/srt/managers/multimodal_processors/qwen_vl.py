@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import math
 from typing import List, Union
 
@@ -125,6 +126,11 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             input_text=base_output.input_text,
             images=base_output.images,
         )
+        ret_cpu = dict()
+        for key, value in ret.items():
+            ret_cpu[key] = value.to('cpu', copy=False) if isinstance(value, torch.Tensor) else value
+            print(key, type(value), (value.shape, value.dtype) if isinstance(value, torch.Tensor) else None)
+        ret = ret_cpu
 
         items = []
 
@@ -132,7 +138,7 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         if "pixel_values" in ret:
             items += [
                 MultimodalDataItem(
-                    pixel_values=ret["pixel_values"],
+                    pixel_values=ret["pixel_values"].to(torch.bfloat16),
                     image_grid_thws=torch.concat([ret["image_grid_thw"]]),
                     # TODO
                     video_grid_thws=None,

@@ -125,8 +125,8 @@ class Qwen2_5_VisionBlock(nn.Module):
         self.norm1 = Qwen2RMSNorm(dim, eps=1e-6)
         self.norm2 = Qwen2RMSNorm(dim, eps=1e-6)
         if attn_implementation == "sdpa":
-            use_context_forward = False
             softmax_in_single_precision = False
+            use_context_forward = False
             flatten_batch = True
         elif attn_implementation == "flash_attention_2":
             softmax_in_single_precision = False
@@ -263,7 +263,7 @@ class Qwen2_5_VisionTransformer(nn.Module):
                     num_heads=num_heads,
                     hidden_act=vision_config.hidden_act,
                     norm_layer=norm_layer,
-                    attn_implementation="sdpa",
+                    attn_implementation="flash_attention_2",
                     quant_config=quant_config,
                     prefix=add_prefix(f"blocks.{i}", prefix),
                 )

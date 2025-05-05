@@ -82,7 +82,7 @@ class BaseMultimodalProcessor(ABC):
         if hasattr(processor, "image_processor") and isinstance(
             processor.image_processor, BaseImageProcessorFast
         ):
-            kwargs["device"] = "cuda"
+            kwargs["device"] = os.getenv("SGLANG_IMAGE_PROCESSOR_FAST_DEVICE", "cuda")
         result = processor.__call__(
             text=[input_text],
             padding=True,
