@@ -249,7 +249,7 @@ class MultimodalDataItem:
                 return tensor_hash([f])
             return data_hash(f)
 
-        if self.is_audio():
+        if self.is_modality(Modality.AUDIO):
             self.hash = hash_feature(self.audio_features)
         else:
             self.hash = hash_feature(self.pixel_values)
@@ -257,20 +257,23 @@ class MultimodalDataItem:
         assert self.hash is not None
         self.pad_value = self.hash % (1 << 30)
 
-    def is_audio(self):
-        return (
-            self.modality == Modality.AUDIO
-        ) and not MultimodalDataItem.is_empty_list(self.audio_features)
+    def is_modality(self, modality: Modality) -> bool:
+        return self.modality == modality
 
     def is_image(self):
         return (
-            self.modality == Modality.IMAGE or self.modality == Modality.MULTI_IMAGES
+            self.is_modality(Modality.IMAGE) or self.is_modality(Modality.MULTI_IMAGES)
         ) and not MultimodalDataItem.is_empty_list(self.pixel_values)
 
     def is_video(self):
         return (
-            self.modality == Modality.VIDEO
+            self.is_modality(Modality.VIDEO)
         ) and not MultimodalDataItem.is_empty_list(self.pixel_values)
+
+    def is_audio(self):
+        return (
+            self.is_modality(Modality.AUDIO)
+        ) and not MultimodalDataItem.is_empty_list(self.audio_features)
 
     def is_valid(self) -> bool:
         return self.is_image() or self.is_video() or self.is_audio()
@@ -325,6 +328,7 @@ class MultimodalInputs:
             "im_token_id",
             "im_start_id",
             "im_end_id",
+            "video_token_id",
             "slice_start_id",
             "slice_end_id",
             "audio_start_id",
@@ -337,11 +341,12 @@ class MultimodalInputs:
         return ret
 
     def contains_image_inputs(self) -> bool:
-        """ """
         return any(item.is_image() for item in self.mm_items)
 
+    def contains_video_inputs(self) -> bool:
+        return any(item.is_video() for item in self.mm_items)
+
     def contains_audio_inputs(self) -> bool:
-        """ """
         return any(item.is_audio() for item in self.mm_items)
 
     def contains_mm_input(self) -> bool:
@@ -748,6 +753,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     out_cache_loc: torch.Tensor = None  # shape: [b], int64
     output_ids: torch.Tensor = None  # shape: [b], int64
 
+    # For multimodal inputs
+    multimodal_inputs: Optional[List] = None
+
     # The sum of all sequence lengths
     seq_lens_sum: int = None
 
@@ -1066,6 +1074,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         # Copy prefix and do some basic check
         input_embeds = []
         extend_input_logprob_token_ids = []
+        multimodal_inputs = []
 
         for i, (req, seq_len, pre_len) in enumerate(zip(reqs, seq_lens, prefix_lens)):
             req.req_pool_idx = req_pool_indices[i]
@@ -1080,6 +1089,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             if req.input_embeds is not None:
                 # If req.input_embeds is already a list, append its content directly
                 input_embeds.extend(req.input_embeds)  # Use extend to avoid nesting
+
+            multimodal_inputs.append(req.multimodal_inputs)
 
             req.cached_tokens += pre_len - req.already_computed
             req.already_computed = seq_len
@@ -1163,6 +1174,16 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             if input_embeds
             else None
         )
+        for mm_input in multimodal_inputs:
+            if mm_input is None:
+                continue
+            for mm_item in mm_input.mm_items:
+                pixel_values = getattr(mm_item, "pixel_values", None)
+                if isinstance(pixel_values, torch.Tensor):
+                    mm_item.pixel_values = pixel_values.to(
+                        self.device, non_blocking=True
+                    )
+        self.multimodal_inputs = multimodal_inputs
         self.seq_lens_sum = sum(seq_lens)
 
         if self.return_logprob:
@@ -1471,6 +1492,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             self.encoder_lens_cpu = [self.encoder_lens_cpu[i] for i in keep_indices]
 
         self.reqs = [self.reqs[i] for i in keep_indices]
+        self.multimodal_inputs = [self.multimodal_inputs[i] for i in keep_indices]
         self.req_pool_indices = self.req_pool_indices[keep_indices_device]
         self.seq_lens = self.seq_lens[keep_indices_device]
         self.out_cache_loc = None
@@ -1519,6 +1541,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             self.top_logprobs_nums = [0] * len(self.reqs) + other.top_logprobs_nums
             self.token_ids_logprobs = [None] * len(self.reqs) + other.token_ids_logprobs
         self.reqs.extend(other.reqs)
+        self.multimodal_inputs.extend(other.multimodal_inputs)
 
         self.return_logprob |= other.return_logprob
         self.has_stream |= other.has_stream
@@ -1577,7 +1600,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             extend_seq_lens=extend_seq_lens,
             extend_prefix_lens=extend_prefix_lens,
             extend_logprob_start_lens=extend_logprob_start_lens,
-            multimodal_inputs=[r.multimodal_inputs for r in self.reqs],
+            multimodal_inputs=self.multimodal_inputs,
             encoder_cached=self.encoder_cached,
             encoder_lens=self.encoder_lens,
             encoder_lens_cpu=self.encoder_lens_cpu,

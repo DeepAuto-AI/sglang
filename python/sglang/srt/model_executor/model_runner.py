@@ -175,6 +175,7 @@ class ModelRunner:
                 "speculative_accept_threshold_single": server_args.speculative_accept_threshold_single,
                 "speculative_accept_threshold_acc": server_args.speculative_accept_threshold_acc,
                 "use_mla_backend": self.use_mla_backend,
+                "mm_attention_backend": server_args.mm_attention_backend,
             }
         )
 
@@ -280,9 +281,10 @@ class ModelRunner:
                     server_args.attention_backend = "fa3"
                 else:
                     server_args.attention_backend = "triton"
-            logger.info(
-                f"Attention backend not set. Use {server_args.attention_backend} backend by default."
-            )
+            if self.should_log:
+                logger.info(
+                    f"Attention backend not set. Use {server_args.attention_backend} backend by default."
+                )
         elif self.use_mla_backend:
             if server_args.device != "cpu":
                 if server_args.attention_backend in [
@@ -292,9 +294,10 @@ class ModelRunner:
                     "flashmla",
                     "cutlass_mla",
                 ]:
-                    logger.info(
-                        f"MLA optimization is turned on. Use {server_args.attention_backend} backend."
-                    )
+                    if self.should_log:
+                        logger.info(
+                            f"MLA optimization is turned on. Use {server_args.attention_backend} backend."
+                        )
                 else:
                     raise ValueError(
                         f"Invalid attention backend for MLA: {server_args.attention_backend}"
@@ -313,9 +316,10 @@ class ModelRunner:
             server_args.attention_backend = "triton"
 
         if server_args.enable_double_sparsity:
-            logger.info(
-                "Double sparsity optimization is turned on. Use triton backend without CUDA graph."
-            )
+            if self.should_log:
+                logger.info(
+                    "Double sparsity optimization is turned on. Use triton backend without CUDA graph."
+                )
             server_args.attention_backend = "triton"
             server_args.disable_cuda_graph = True
             if server_args.ds_heavy_channel_type is None:
@@ -330,23 +334,26 @@ class ModelRunner:
 
         if self.is_multimodal:
             self.mem_fraction_static *= 0.90
-            logger.info(
-                f"Automatically reduce --mem-fraction-static to {self.mem_fraction_static:.3f} "
-                f"because this is a multimodal model."
-            )
-            logger.info(
-                "Automatically turn off --chunked-prefill-size for multimodal model."
-            )
+            if self.should_log:
+                logger.info(
+                    f"Automatically reduce --mem-fraction-static to {self.mem_fraction_static:.3f} "
+                    f"because this is a multimodal model."
+                )
+                logger.info(
+                    "Automatically turn off --chunked-prefill-size for multimodal model."
+                )
             server_args.chunked_prefill_size = -1
 
         if not self.use_mla_backend:
             server_args.disable_chunked_prefix_cache = True
         elif self.page_size > 1:
-            logger.info("Disable chunked prefix cache when page size > 1.")
+            if self.should_log:
+                logger.info("Disable chunked prefix cache when page size > 1.")
             server_args.disable_chunked_prefix_cache = True
 
         if not server_args.disable_chunked_prefix_cache:
-            logger.info("Chunked prefix cache is turned on.")
+            if self.should_log:
+                logger.info("Chunked prefix cache is turned on.")
 
     def init_torch_distributed(self):
         logger.info("Init torch distributed begin.")
@@ -367,6 +374,8 @@ class ModelRunner:
             backend = "hccl"
         elif self.device == "cpu":
             backend = "gloo"
+        elif self.device == "npu":
+            backend = "hccl"
 
         before_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
         if not self.server_args.enable_p2p_check:
@@ -437,9 +446,10 @@ class ModelRunner:
             torch.set_num_threads(1)
         if self.device == "cuda":
             if torch.cuda.get_device_capability()[0] < 8:
-                logger.info(
-                    "Compute capability below sm80. Use float16 due to lack of bfloat16 support."
-                )
+                if self.should_log:
+                    logger.info(
+                        "Compute capability below sm80. Use float16 due to lack of bfloat16 support."
+                    )
                 self.server_args.dtype = "float16"
                 self.model_config.dtype = torch.float16
                 if torch.cuda.get_device_capability()[1] < 5:
@@ -491,10 +501,11 @@ class ModelRunner:
                     self.model.load_kv_cache_scales(
                         self.server_args.quantization_param_path
                     )
-                    logger.info(
-                        "Loaded KV cache scaling factors from %s",
-                        self.server_args.quantization_param_path,
-                    )
+                    if self.should_log:
+                        logger.info(
+                            "Loaded KV cache scaling factors from %s",
+                            self.server_args.quantization_param_path,
+                        )
                 else:
                     raise RuntimeError(
                         "Using FP8 KV cache and scaling factors provided but "
@@ -586,12 +597,7 @@ class ModelRunner:
             return iter
 
         def model_load_weights(model, iter):
-            model.load_weights(iter)
-            for _, module in self.model.named_modules():
-                quant_method = getattr(module, "quant_method", None)
-                if quant_method is not None:
-                    with device_loading_context(module, target_device):
-                        quant_method.process_weights_after_loading(module)
+            DefaultModelLoader.load_weights_and_postprocess(model, iter, target_device)
             return model
 
         with set_default_torch_dtype(self.model_config.dtype):
@@ -1147,7 +1153,8 @@ class ModelRunner:
         )
 
     def apply_torch_tp(self):
-        logger.info(f"Enabling torch tensor parallelism on {self.tp_size} devices.")
+        if self.should_log:
+            logger.info(f"Enabling torch tensor parallelism on {self.tp_size} devices.")
         from sglang.srt.model_parallel import tensor_parallel
 
         device_mesh = torch.distributed.init_device_mesh(self.device, (self.tp_size,))
@@ -1266,7 +1273,9 @@ class ModelRunner:
                 [self.sample(values, forward_batch) for values in logits_output],
                 axis=-1,
             )
-
+        sampling_info = forward_batch.sampling_info
+        if sampling_info.thinking_budgets is not None:
+            sampling_info.apply_thinking_budgets(logits_output.next_token_logits)
         self._preprocess_logits(logits_output, forward_batch.sampling_info)
 
         # Sample the next tokens
@@ -1277,6 +1286,8 @@ class ModelRunner:
             forward_batch.top_logprobs_nums,
             forward_batch.token_ids_logprobs,
         )
+        if sampling_info.thinking_budgets is not None:
+            sampling_info.update_thinking_budgets(next_token_ids)
         return next_token_ids
 
     @property

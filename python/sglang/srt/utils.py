@@ -56,6 +56,7 @@ import torch.distributed
 import torch.distributed as dist
 import triton
 import zmq
+from decord import VideoReader, cpu, gpu
 from fastapi.responses import ORJSONResponse
 from packaging import version as pkg_version
 from PIL import Image
@@ -143,6 +144,10 @@ def is_hpu() -> bool:
 
 def is_xpu() -> bool:
     return hasattr(torch, "xpu") and torch.xpu.is_available()
+
+
+def is_npu() -> bool:
+    return hasattr(torch, "npu") and torch.npu.is_available()
 
 
 def is_flashinfer_available():
@@ -328,6 +333,16 @@ def get_available_gpu_memory(device, gpu_id, distributed=False, empty_cache=True
     elif device == "cpu":
         # TODO: rename the variables in the current function to be not GPU specific
         free_gpu_memory = psutil.virtual_memory().available
+    elif device == "npu":
+        num_gpus = torch.npu.device_count()
+        assert gpu_id < num_gpus
+
+        if torch.npu.current_device() != gpu_id:
+            print(
+                f"WARNING: current device is not {gpu_id}, but {torch.npu.current_device()}, ",
+                "which may cause useless memory allocation for torch NPU context.",
+            )
+        free_gpu_memory, total_gpu_memory = torch.npu.mem_get_info()
 
     if distributed:
         tensor = torch.tensor(free_gpu_memory, dtype=torch.float32).to(
@@ -634,15 +649,64 @@ def load_image(
     elif image_file.startswith("data:"):
         image_file = image_file.split(",")[1]
         image = Image.open(BytesIO(base64.b64decode(image_file)))
-    elif image_file.startswith("video:"):
-        image_file = image_file.replace("video:", "")
-        image, image_size = decode_video_base64(image_file)
     elif isinstance(image_file, str):
         image = Image.open(BytesIO(base64.b64decode(image_file)))
     else:
         raise ValueError(f"Invalid image: {image}")
 
     return image, image_size
+
+
+def load_video(video_file: Union[str, bytes], use_gpu: bool = True) -> VideoReader:
+    try:
+        from decord.bridge import decord_bridge
+
+        ctx = gpu(0)
+        _ = decord_bridge.get_ctx_device(ctx)
+    except Exception:
+        ctx = cpu(0)
+
+    tmp_file = None
+    vr = None
+    try:
+        if isinstance(video_file, bytes):
+            tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+            tmp_file.write(video_file)
+            tmp_file.close()
+            vr = VideoReader(tmp_file.name, ctx=ctx)
+        elif isinstance(video_file, str):
+            if video_file.startswith(("http://", "https://")):
+                timeout = int(os.getenv("REQUEST_TIMEOUT", "10"))
+                response = requests.get(video_file, stream=True, timeout=timeout)
+                response.raise_for_status()
+                tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                for chunk in response.iter_content(chunk_size=8192):
+                    tmp_file.write(chunk)
+                tmp_file.close()
+                vr = VideoReader(tmp_file.name, ctx=ctx)
+            elif video_file.startswith("data:"):
+                _, encoded = video_file.split(",", 1)
+                video_bytes = base64.b64decode(encoded)
+                tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                tmp_file.write(video_bytes)
+                tmp_file.close()
+                vr = VideoReader(tmp_file.name, ctx=ctx)
+            elif os.path.isfile(video_file):
+                vr = VideoReader(video_file, ctx=ctx)
+            else:
+                video_bytes = base64.b64decode(video_file)
+                tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+                tmp_file.write(video_bytes)
+                tmp_file.close()
+                vr = VideoReader(tmp_file.name, ctx=ctx)
+        else:
+            raise ValueError(f"Unsupported video input type: {type(video_file)}")
+
+        return vr
+
+    finally:
+        if tmp_file and os.path.exists(tmp_file.name):
+            os.unlink(tmp_file.name)
 
 
 def suppress_other_loggers():
@@ -897,7 +961,10 @@ def broadcast_pyobj(
     src: int = 0,
     force_cpu_device: bool = True,
 ):
-    """Broadcast inputs from rank=0 to all other ranks with torch.dist backend."""
+    """Broadcast inputs from src rank to all other ranks with torch.dist backend.
+    The `rank` here refer to the source rank on global process group (regardless
+    of dist_group argument).
+    """
     device = torch.device(
         "cuda" if torch.cuda.is_available() and not force_cpu_device else "cpu"
     )
@@ -1345,6 +1412,9 @@ def get_device_name(device_id: int = 0) -> str:
     if hasattr(torch, "hpu") and torch.hpu.is_available():
         return torch.hpu.get_device_name(device_id)
 
+    if hasattr(torch, "npu") and torch.npu.is_available():
+        return torch.npu.get_device_name(device_id)
+
 
 @lru_cache(maxsize=1)
 def is_habana_available() -> bool:
@@ -1440,6 +1510,13 @@ def get_device_capability(device_id: int = 0) -> Tuple[int, int]:
 def get_compiler_backend() -> str:
     if hasattr(torch, "hpu") and torch.hpu.is_available():
         return "hpu_backend"
+
+    if hasattr(torch, "npu") and torch.npu.is_available():
+        import torchair
+
+        config = torchair.CompilerConfig()
+        npu_backend = torchair.get_npu_backend(compiler_config=config)
+        return npu_backend
 
     return "inductor"
 
@@ -2069,3 +2146,10 @@ class BumpAllocator:
         output = self._buffer[self._pointer : self._pointer + size]
         self._pointer += size
         return output
+
+
+def log_info_on_rank0(logger, msg):
+    from sglang.srt.distributed import get_tensor_model_parallel_rank
+
+    if get_tensor_model_parallel_rank() == 0:
+        logger.info(msg)

@@ -532,7 +532,7 @@ class VisionTransformerBlock(nn.Module):
             num_heads=num_heads,
             projection_size=dim,
             use_qkv_parallel=True,
-            use_context_forward=False,
+            qkv_backend="sdpa",
             softmax_in_single_precision=False,
             dropout=attn_drop,
         )
@@ -1989,7 +1989,7 @@ class MultiModalityCausalLM(MultiModalityPreTrainedModel):
         hidden_states = general_mm_embed_routine(
             input_ids=input_ids,
             forward_batch=forward_batch,
-            image_data_embedding_func=self.get_image_feature,
+            multimodal_model=self,
             language_model=self.language_model,
             positions=positions,
         )

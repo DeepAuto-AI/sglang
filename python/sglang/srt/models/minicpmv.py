@@ -197,7 +197,7 @@ class Idefics2EncoderLayer(nn.Module):
             use_qkv_parallel=True,
             quant_config=quant_config,
             dropout=config.attention_dropout,
-            use_context_forward=False,
+            qkv_backend="sdpa",
             softmax_in_single_precision=True,
             flatten_batch=False,
             prefix=add_prefix("self_attn", prefix),
@@ -865,7 +865,7 @@ class MiniCPMBaseModel(nn.Module):
         hidden_states = general_mm_embed_routine(
             input_ids=input_ids,
             forward_batch=forward_batch,
-            image_data_embedding_func=self.get_image_feature,
+            multimodal_model=self,
             language_model=self.llm,
             positions=positions,
         )

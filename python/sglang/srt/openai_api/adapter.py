@@ -14,6 +14,7 @@
 """Conversion between OpenAI APIs and native SRT APIs"""
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -528,6 +529,7 @@ def v1_generate_request(
                 "temperature": request.temperature,
                 "max_new_tokens": request.max_tokens,
                 "min_new_tokens": request.min_tokens,
+                "thinking_budget": request.thinking_budget,
                 "stop": request.stop,
                 "stop_token_ids": request.stop_token_ids,
                 "top_p": request.top_p,
@@ -926,6 +928,7 @@ def v1_chat_generate_request(
     prompts = []
     sampling_params_list = []
     image_data_list = []
+    video_data_list = []
     audio_data_list = []
     return_logprobs = []
     logprob_start_lens = []
@@ -941,6 +944,7 @@ def v1_chat_generate_request(
         #  - prompt: The full prompt string.
         #  - stop: Custom stop tokens.
         #  - image_data: None or a list of image strings (URLs or base64 strings).
+        #  - video_data: None or a list of video strings (URLs).
         #  - audio_data: None or a list of audio strings (URLs).
         #    None skips any image processing in GenerateReqInput.
         strict_tag = None
@@ -970,17 +974,19 @@ def v1_chat_generate_request(
                 for message in request.messages:
                     if message.content is None:
                         message.content = ""
-                    if isinstance(message.content, str):
-                        openai_compatible_messages.append(
-                            {"role": message.role, "content": message.content}
-                        )
+                    msg_dict = message.dict()
+                    if isinstance(msg_dict.get("content"), list):
+                        for chunk in msg_dict["content"]:
+                            if isinstance(chunk, dict) and chunk.get("type") == "text":
+                                new_msg = msg_dict.copy()
+                                new_msg["content"] = chunk["text"]
+                                new_msg = {
+                                    k: v for k, v in new_msg.items() if v is not None
+                                }
+                                openai_compatible_messages.append(new_msg)
                     else:
-                        content_list = message.dict()["content"]
-                        for content in content_list:
-                            if content["type"] == "text":
-                                openai_compatible_messages.append(
-                                    {"role": message.role, "content": content["text"]}
-                                )
+                        msg_dict = {k: v for k, v in msg_dict.items() if v is not None}
+                        openai_compatible_messages.append(msg_dict)
                 if (
                     openai_compatible_messages
                     and openai_compatible_messages[-1]["role"] == "assistant"
@@ -1035,6 +1041,7 @@ def v1_chat_generate_request(
                     prompt = tokenizer_manager.tokenizer.decode(prompt_ids)
                 stop = request.stop
                 image_data = None
+                video_data = None
                 audio_data = None
                 modalities = []
             else:
@@ -1067,6 +1074,7 @@ def v1_chat_generate_request(
                     prompt = conv.get_prompt()
 
                 image_data = conv.image_data
+                video_data = conv.video_data
                 audio_data = conv.audio_data
                 modalities = conv.modalities
                 stop = conv.stop_str or [] if not request.ignore_eos else []
@@ -1084,6 +1092,7 @@ def v1_chat_generate_request(
             prompt_ids = request.messages
             stop = request.stop
             image_data = None
+            video_data = None
             audio_data = None
             modalities = []
             prompt = request.messages
@@ -1098,6 +1107,7 @@ def v1_chat_generate_request(
             "temperature": request.temperature,
             "max_new_tokens": request.max_tokens or request.max_completion_tokens,
             "min_new_tokens": request.min_tokens,
+            "thinking_budget": request.thinking_budget,
             "stop": stop,
             "stop_token_ids": request.stop_token_ids,
             "top_p": request.top_p,
@@ -1145,6 +1155,7 @@ def v1_chat_generate_request(
         sampling_params_list.append(sampling_params)
 
         image_data_list.append(image_data)
+        video_data_list.append(video_data)
         audio_data_list.append(audio_data)
         modalities_list.append(modalities)
     if len(all_requests) == 1:
@@ -1158,6 +1169,7 @@ def v1_chat_generate_request(
                 prompt_kwargs = {"input_ids": input_ids[0]}
         sampling_params_list = sampling_params_list[0]
         image_data_list = image_data_list[0]
+        video_data_list = video_data_list[0]
         audio_data_list = audio_data_list[0]
         return_logprobs = return_logprobs[0]
         logprob_start_lens = logprob_start_lens[0]
@@ -1177,6 +1189,7 @@ def v1_chat_generate_request(
     adapted_request = GenerateReqInput(
         **prompt_kwargs,
         image_data=image_data_list,
+        video_data=video_data_list,
         audio_data=audio_data_list,
         sampling_params=sampling_params_list,
         return_logprob=return_logprobs,
@@ -1290,7 +1303,8 @@ def v1_chat_generate_response(
                     text, call_info_list = parser.parse_non_stream(text)
                     tool_calls = [
                         ToolCall(
-                            id=str(call_info.tool_index),
+                            id=f"call_{base64.urlsafe_b64encode(uuid.uuid4().bytes).rstrip(b'=').decode()}",
+                            index=call_info.tool_index,
                             function=FunctionResponse(
                                 name=call_info.name, arguments=call_info.parameters
                             ),
@@ -1406,6 +1420,7 @@ async def v1_chat_completions(
         reasoning_parser_dict = {}
 
         async def generate_stream_resp():
+            tool_call_first = True
             is_firsts = {}
             stream_buffers = {}
             n_prev_tokens = {}
@@ -1572,7 +1587,6 @@ async def v1_chat_completions(
                         # 2) if we found calls, we output them as separate chunk(s)
                         for call_item in calls:
                             # transform call_item -> FunctionResponse + ToolCall
-
                             if finish_reason_type == "stop":
                                 latest_delta_len = 0
                                 if isinstance(call_item.parameters, str):
@@ -1595,15 +1609,19 @@ async def v1_chat_completions(
                                 call_item.parameters = remaining_call
 
                                 finish_reason_type = "tool_calls"
-
                             tool_call = ToolCall(
-                                id=str(call_item.tool_index),
+                                id=(
+                                    f"call_{base64.urlsafe_b64encode(uuid.uuid4().bytes).rstrip(b'=').decode()}"
+                                    if tool_call_first
+                                    else None
+                                ),
                                 index=call_item.tool_index,
                                 function=FunctionResponse(
                                     name=call_item.name,
                                     arguments=call_item.parameters,
                                 ),
                             )
+                            tool_call_first = False
                             choice_data = ChatCompletionResponseStreamChoice(
                                 index=index,
                                 delta=DeltaMessage(tool_calls=[tool_call]),

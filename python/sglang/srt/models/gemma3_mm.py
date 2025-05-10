@@ -281,7 +281,7 @@ class Gemma3ForConditionalGeneration(PreTrainedModel):
         pixel_values = torch.stack(
             flatten_nested_list([item.pixel_values for item in items]), dim=0
         )
-        pixel_values = pixel_values.to("cuda")
+        pixel_values = pixel_values.to(device=self.vision_tower.device)
         pixel_values = pixel_values.to(dtype=self.language_model.dtype())
 
         vision_outputs = self.vision_tower(pixel_values=pixel_values).last_hidden_state
@@ -350,7 +350,7 @@ class Gemma3ForConditionalGeneration(PreTrainedModel):
             input_ids=llm_input_ids,
             forward_batch=forward_batch,
             language_model=self.language_model,
-            image_data_embedding_func=self.get_image_feature,
+            multimodal_model=self,
             positions=positions,
         )
 
