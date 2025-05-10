@@ -226,6 +226,7 @@ class ModelConfig:
             enable_multimodal=server_args.enable_multimodal,
             dtype=server_args.dtype,
             quantization=server_args.quantization,
+            is_context_extended=server_args.enable_hip_attention,
             **kwargs,
         )
 
