@@ -169,6 +169,7 @@ class Qwen2MoeSparseMoeBlock(nn.Module):
 class Qwen2MoeAttention(nn.Module):
     def __init__(
         self,
+        config: PretrainedConfig,
         hidden_size: int,
         num_heads: int,
         num_kv_heads: int,
@@ -236,6 +237,10 @@ class Qwen2MoeAttention(nn.Module):
             layer_id=layer_id,
             quant_config=quant_config,
             prefix=add_prefix("attn", prefix),
+            orig_context_len=getattr(
+                config, "orig_context_len", max_position_embeddings
+            ),
+            rope=self.rotary_emb,
         )
 
     def forward(
@@ -246,7 +251,13 @@ class Qwen2MoeAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q, k = self.rotary_emb(positions, q, k)
+        
+        # RoPE is applied inside the attention kernel in HiP Attention
+        if (forward_batch.hip_metadata_cache_pool is None) or (
+            not forward_batch.hip_metadata_cache_pool.hip_config.using_extend
+        ):
+            q, k = self.rotary_emb(positions, q, k)
+
         attn_output = self.attn(q, k, v, forward_batch)
         output, _ = self.o_proj(attn_output)
         return output
@@ -267,6 +278,7 @@ class Qwen2MoeDecoderLayer(nn.Module):
         max_position_embeddings = getattr(config, "max_position_embeddings", 8192)
         qkv_bias = getattr(config, "qkv_bias", True)
         self.self_attn = Qwen2MoeAttention(
+            config=config,
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             num_kv_heads=config.num_key_value_heads,
@@ -373,12 +385,18 @@ class Qwen2MoeModel(nn.Module):
         else:
             hidden_states = input_embeds
         residual = None
+
+        forward_batch.on_model_start()
         for i in range(len(self.layers)):
+            forward_batch.on_layer_start(i)
             expert_distribution_recorder.set_current_layer(i)
             layer = self.layers[i]
             hidden_states, residual = layer(
                 positions, hidden_states, forward_batch, residual
             )
+            forward_batch.on_layer_end(i)
+        forward_batch.on_model_end()
+        
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
@@ -386,6 +404,8 @@ class Qwen2MoeModel(nn.Module):
 class Qwen2MoeForCausalLM(nn.Module):
 
     fall_back_to_pt_during_load = False
+
+    hip_attention_supported = True
 
     def __init__(
         self,
