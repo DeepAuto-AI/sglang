@@ -843,7 +843,7 @@ def _wait_and_warmup(
                 url + request_name,
                 json=json_data,
                 headers=headers,
-                timeout=600,
+                timeout=6000,
             )
             assert res.status_code == 200, f"{res}"
             print(res.json())
