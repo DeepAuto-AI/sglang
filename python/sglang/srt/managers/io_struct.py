@@ -279,30 +279,32 @@ class GenerateReqInput:
             self.image_data = [[self.image_data]] * num
             self.modalities = ["image"] * num
         elif isinstance(self.image_data, list):
-            if len(self.image_data) != self.batch_size:
+            if len(self.image_data) == 0:
+                self.image_data = [None] * num
+            elif len(self.image_data) != self.batch_size:
                 raise ValueError(
                     "The length of image_data should be equal to the batch size."
                 )
-
-            self.modalities = []
-            if len(self.image_data) > 0 and isinstance(self.image_data[0], list):
-                # Already a list of lists, keep as is
-                for i in range(len(self.image_data)):
-                    if self.image_data[i] is None or self.image_data[i] == [None]:
-                        self.modalities.append(None)
-                    elif len(self.image_data[i]) == 1:
-                        self.modalities.append("image")
-                    elif len(self.image_data[i]) > 1:
-                        self.modalities.append("multi-images")
-                # Expand parallel_sample_num
-                self.image_data = self.image_data * self.parallel_sample_num
-                self.modalities = self.modalities * self.parallel_sample_num
             else:
-                # List of images for a batch, wrap each in a list
-                wrapped_images = [[img] for img in self.image_data]
-                # Expand for parallel sampling
-                self.image_data = wrapped_images * self.parallel_sample_num
-                self.modalities = ["image"] * num
+                self.modalities = []
+                if len(self.image_data) > 0 and isinstance(self.image_data[0], list):
+                    # Already a list of lists, keep as is
+                    for i in range(len(self.image_data)):
+                        if self.image_data[i] is None or self.image_data[i] == [None]:
+                            self.modalities.append(None)
+                        elif len(self.image_data[i]) == 1:
+                            self.modalities.append("image")
+                        elif len(self.image_data[i]) > 1:
+                            self.modalities.append("multi-images")
+                    # Expand parallel_sample_num
+                    self.image_data = self.image_data * self.parallel_sample_num
+                    self.modalities = self.modalities * self.parallel_sample_num
+                else:
+                    # List of images for a batch, wrap each in a list
+                    wrapped_images = [[img] for img in self.image_data]
+                    # Expand for parallel sampling
+                    self.image_data = wrapped_images * self.parallel_sample_num
+                    self.modalities = ["image"] * num
 
     def _normalize_video_data(self, num):
         """Normalize audio data for batch processing."""
