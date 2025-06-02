@@ -1565,6 +1565,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
                 global_server_args_dict["use_mla_backend"]
                 and global_server_args_dict["attention_backend"] == "flashinfer"
             )
+            or global_server_args_dict["attention_backend"] == "hip_attention"
             or global_server_args_dict["attention_backend"] == "flashmla"
             or global_server_args_dict["attention_backend"] == "fa3"
             or global_server_args_dict["attention_backend"] == "cutlass_mla"
