@@ -409,9 +409,9 @@ class GenerateReqInput:
         return GenerateReqInput(
             text=self.text[i] if self.text is not None else None,
             input_ids=self.input_ids[i] if self.input_ids is not None else None,
-            image_data=self.image_data[i],
-            video_data=self.video_data[i],
-            audio_data=self.audio_data[i],
+            image_data=self.image_data[i] if self.image_data else None,
+            video_data=self.video_data[i] if self.video_data else None,
+            audio_data=self.audio_data[i] if self.audio_data else None,
             sampling_params=self.sampling_params[i],
             rid=self.rid[i],
             return_logprob=self.return_logprob[i],
