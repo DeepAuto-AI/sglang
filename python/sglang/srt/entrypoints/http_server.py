@@ -806,6 +806,8 @@ def _wait_and_warmup(
     # Send a warmup request
     request_name = "/generate" if model_info["is_generation"] else "/encode"
     max_new_tokens = 128 if model_info["is_generation"] else 1
+    if os.getenv('SGLANG_DEBUG_EXIT_WARMUP', '0') == '1':
+        max_new_tokens = 10
     json_data = {
         "sampling_params": {
             "temperature": 0,
@@ -855,6 +857,9 @@ def _wait_and_warmup(
             )
             assert res.status_code == 200, f"{res}"
             print(res.json())
+            if os.getenv('SGLANG_DEBUG_EXIT_WARMUP', '0') == '1':
+                print('shutdown after warmup')
+                kill_process_tree(os.getpid())
         else:
             logger.info(f"Start of prefill warmup ...")
             json_data = {
