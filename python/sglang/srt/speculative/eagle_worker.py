@@ -226,7 +226,7 @@ class EAGLEWorker(TpModelWorker):
                 self.draft_model_runner,
                 skip_prefill=False,
             )
-        elif self.server_args.attention_backend == "fa3":
+        elif self.server_args.attention_backend in ["fa3", "hip_attention"]:
             from sglang.srt.layers.attention.flashattention_backend import (
                 FlashAttentionBackend,
                 FlashAttentionMultiStepBackend,
