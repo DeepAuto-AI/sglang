@@ -293,6 +293,7 @@ class ModelRunner:
                     "triton",
                     "flashmla",
                     "cutlass_mla",
+                    "hip_attention",
                 ]:
                     if self.should_log:
                         logger.info(
@@ -1122,7 +1123,10 @@ class ModelRunner:
 
             self.attn_backend = CutlassMLABackend(self)
 
-        elif self.server_args.enable_hip_attention:
+        elif self.server_args.enable_hip_attention or (self.server_args.attention_backend == "hip_attention"):
+            assert self.server_args.enable_hip_attention
+            assert self.server_args.attention_backend == "hip_attention"
+            
             from sglang.srt.layers.attention.hip_attention import HiPAttentionBackend
 
             self.attn_backend = HiPAttentionBackend(self)

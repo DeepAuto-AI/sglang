@@ -186,7 +186,7 @@ class EAGLEWorker(TpModelWorker):
             self.draft_extend_attn_backend = None
             self.padded_static_len = self.speculative_num_steps + 1
             self.has_prefill_wrapper_verify = False
-        elif self.server_args.attention_backend == "fa3":
+        elif self.server_args.attention_backend in ["fa3", "hip_attention"]:
             from sglang.srt.layers.attention.flashattention_backend import (
                 FlashAttentionMultiStepBackend,
             )
