@@ -1401,6 +1401,7 @@ class ServerArgs:
                 "fa3",
                 "flashmla",
                 "cutlass_mla",
+                "hip_attention",
             ],
             default=ServerArgs.decode_attention_backend,
             help="Choose the kernels for decode attention layers (have priority over --attention-backend).",
@@ -2012,6 +2013,9 @@ class ServerArgs:
         args.pp_size = args.pipeline_parallel_size
         args.dp_size = args.data_parallel_size
         args.ep_size = args.expert_parallel_size
+        
+        if args.attention_backend == 'hip_attention':
+            args.enable_hip_attention = True
 
         if args.enable_hip_attention:
             from hip_attn.v1_2 import HiPAttentionConfig
