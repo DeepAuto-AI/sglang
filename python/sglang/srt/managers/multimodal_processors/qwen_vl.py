@@ -255,8 +255,16 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         )
         ret_cpu = dict()
         for key, value in ret.items():
-            ret_cpu[key] = value.to('cpu', copy=False) if isinstance(value, torch.Tensor) else value
-            print(key, type(value), (value.shape, value.dtype) if isinstance(value, torch.Tensor) else None)
+            ret_cpu[key] = (
+                value.to("cpu", copy=False)
+                if isinstance(value, torch.Tensor)
+                else value
+            )
+            print(
+                key,
+                type(value),
+                (value.shape, value.dtype) if isinstance(value, torch.Tensor) else None,
+            )
         ret = ret_cpu
 
         items = []

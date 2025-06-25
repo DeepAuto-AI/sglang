@@ -212,13 +212,13 @@ class Qwen3MoeAttention(nn.Module):
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
         q, k = self._apply_qk_norm(q, k)
-        
+
         # RoPE is applied inside the attention kernel in HiP Attention
         if (forward_batch.hip_metadata_cache_pool is None) or (
             not forward_batch.hip_metadata_cache_pool.hip_config.using_extend
         ):
             q, k = self.rotary_emb(positions, q, k)
-        
+
         attn_output = self.attn(q, k, v, forward_batch)
         output, _ = self.o_proj(attn_output)
         return output
