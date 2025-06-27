@@ -806,24 +806,35 @@ def _wait_and_warmup(
     # Send a warmup request
     request_name = "/generate" if model_info["is_generation"] else "/encode"
     max_new_tokens = 128 if model_info["is_generation"] else 1
+    # if os.getenv('SGLANG_DEBUG_EXIT_WARMUP', '0') == '1':
+    #     max_new_tokens = 10
     json_data = {
         "sampling_params": {
             "temperature": 0,
             "max_new_tokens": max_new_tokens,
-            "min_new_tokens": max_new_tokens,
+            "ignore_eos": True,
+            "no_stop_trim": False,
         },
     }
+    print(json_data)
     if server_args.skip_tokenizer_init:
         json_data["input_ids"] = [[10, 11, 12] for _ in range(server_args.dp_size)]
         # TODO Workaround the bug that embedding errors for list of size 1
         if server_args.dp_size == 1:
             json_data["input_ids"] = json_data["input_ids"][0]
     else:
-        passkey = "The passkey is $000310$. " * 3
+        passkey = "The passkey is **000310**. " * 3
         filler = "The grass is green. The sky is blue. The sun is yellow. Here we go. There and back again. "
-        repeat = int(int(os.getenv('PASSKEY_LEN', '64')) * 1024 / 24 / 2)
-        text = f"<|header_start|>user<|header_end|>\n\nYour task is find the passkey value from the text. {filler * repeat} {passkey} {filler * repeat}.<|eot|><|header_start|>assistant<|header_end|>\n\nThe passkey is $"
-        
+        repeat = int(int(os.getenv("PASSKEY_LEN", "8")) * 1024 / 24 / 2)
+        if "Llama-4" in server_args.model_path:
+            text = f"<|header_start|>user<|header_end|>\n\nYour task is find the passkey value from the text. {filler * repeat} {passkey} {filler * repeat}.<|eot|><|header_start|>assistant<|header_end|>\n\nThe passkey is **"
+        elif "Llama-3" in server_args.model_path:
+            text = f"<|start_header_id|>user<|end_header_id|>\n\nYour task is find the passkey value from the text. {filler * repeat} {passkey} {filler * repeat}.<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\nThe passkey is **"
+        elif "Qwen3" in server_args.model_path:
+            text = f"<|im_start|>user\nYour task is find the passkey value from the text. {filler * repeat} {passkey} {filler * repeat}.<|im_end|>\n<|im_start|>assistant\n<think>\n\n</think>\n\nThe passkey is **"
+        else:
+            text = f"### User\n\nYour task is find the passkey value from the text. {filler * repeat} {passkey} {filler * repeat}.\n\n### Response\n\nThe passkey is **"
+
         json_data["text"] = [text] * server_args.dp_size
         # TODO Workaround the bug that embedding errors for list of size 1
         if server_args.dp_size == 1:
@@ -847,6 +858,9 @@ def _wait_and_warmup(
             )
             assert res.status_code == 200, f"{res}"
             print(res.json())
+            if os.getenv("SGLANG_DEBUG_EXIT_WARMUP", "0") == "1":
+                print("shutdown after warmup")
+                kill_process_tree(os.getpid())
         else:
             logger.info(f"Start of prefill warmup ...")
             json_data = {

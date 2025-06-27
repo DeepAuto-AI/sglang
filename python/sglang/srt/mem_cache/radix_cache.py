@@ -291,6 +291,10 @@ class RadixCache(BasePrefixCache):
         if self.disable:
             return 0
 
+        if node is None:
+            warnings.warn("this should be not happend")
+            return 0
+
         delta = 0
         while node != self.root_node:
             if node.lock_ref == 1:
@@ -299,6 +303,9 @@ class RadixCache(BasePrefixCache):
                 delta += len(node.value)
             node.lock_ref -= 1
             node = node.parent
+            if node is None:
+                warnings.warn("this should be not happend")
+                break
         return delta
 
     def evictable_size(self):

@@ -293,6 +293,7 @@ class ModelRunner:
                     "triton",
                     "flashmla",
                     "cutlass_mla",
+                    "hip_attention",
                 ]:
                     if self.should_log:
                         logger.info(
@@ -424,11 +425,11 @@ class ModelRunner:
                         "The memory capacity is unbalanced. Some GPUs may be occupied by other processes. "
                         f"{min_per_gpu_memory=}, {local_gpu_memory=}, {local_gpu_memory * 0.9=}"
                     )
-                else:
-                    raise ValueError(
-                        "The memory capacity is unbalanced. Some GPUs may be occupied by other processes. "
-                        f"{min_per_gpu_memory=}, {local_gpu_memory=}, {local_gpu_memory * 0.9=}"
-                    )
+                # else:
+                #     raise ValueError(
+                #         "The memory capacity is unbalanced. Some GPUs may be occupied by other processes. "
+                #         f"{min_per_gpu_memory=}, {local_gpu_memory=}, {local_gpu_memory * 0.9=}"
+                #     )
 
         logger.info(
             f"Init torch distributed ends. mem usage={(before_avail_memory - local_gpu_memory):.2f} GB"
@@ -466,8 +467,10 @@ class ModelRunner:
             monkey_patch_vllm_gguf_config()
 
         if self.server_args.enable_hip_attention:
-            if hasattr(self.model_config.hf_config, 'text_config'):
-                orig_context_length = get_context_length(self.model_config.hf_config.text_config)
+            if hasattr(self.model_config.hf_config, "text_config"):
+                orig_context_length = get_context_length(
+                    self.model_config.hf_config.text_config
+                )
                 new_context_length = (
                     max(orig_context_length, self.server_args.context_length)
                     if self.server_args.context_length is not None
@@ -476,9 +479,13 @@ class ModelRunner:
                 if self.server_args.context_length is None:
                     new_context_length = orig_context_length
                 update_context_length(self.model_config.hf_config, new_context_length)
-                update_context_length(self.model_config.hf_config.text_config, new_context_length)
+                update_context_length(
+                    self.model_config.hf_config.text_config, new_context_length
+                )
                 self.model_config.hf_config.orig_context_len = orig_context_length
-                self.model_config.hf_config.text_config.orig_context_len = orig_context_length
+                self.model_config.hf_config.text_config.orig_context_len = (
+                    orig_context_length
+                )
             else:
                 orig_context_length = get_context_length(self.model_config.hf_config)
                 new_context_length = (
@@ -1122,7 +1129,12 @@ class ModelRunner:
 
             self.attn_backend = CutlassMLABackend(self)
 
-        elif self.server_args.enable_hip_attention:
+        elif self.server_args.enable_hip_attention or (
+            self.server_args.attention_backend == "hip_attention"
+        ):
+            assert self.server_args.enable_hip_attention
+            assert self.server_args.attention_backend == "hip_attention"
+
             from sglang.srt.layers.attention.hip_attention import HiPAttentionBackend
 
             self.attn_backend = HiPAttentionBackend(self)

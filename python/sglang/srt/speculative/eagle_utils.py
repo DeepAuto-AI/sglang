@@ -263,6 +263,9 @@ class EagleVerifyInput:
             next_power_of_2(bs),
         )
 
+        if batch.hip_mask_refresh_state is not None:
+            batch.hip_metadata_cached_stages = batch.hip_mask_refresh_state.update()
+
     def generate_attn_arg_prefill(
         self,
         req_pool_indices: torch.Tensor,

@@ -251,7 +251,7 @@ class Qwen2MoeAttention(nn.Module):
     ) -> torch.Tensor:
         qkv, _ = self.qkv_proj(hidden_states)
         q, k, v = qkv.split([self.q_size, self.kv_size, self.kv_size], dim=-1)
-        
+
         # RoPE is applied inside the attention kernel in HiP Attention
         if (forward_batch.hip_metadata_cache_pool is None) or (
             not forward_batch.hip_metadata_cache_pool.hip_config.using_extend
@@ -396,7 +396,7 @@ class Qwen2MoeModel(nn.Module):
             )
             forward_batch.on_layer_end(i)
         forward_batch.on_model_end()
-        
+
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 

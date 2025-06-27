@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, Union
 
@@ -18,6 +20,28 @@ if TYPE_CHECKING:
 
 from sgl_kernel import merge_state_v2
 from sgl_kernel.flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+
+try:
+    from sglang.srt.distributed import (
+        get_tensor_model_parallel_rank,
+        get_tensor_model_parallel_world_size,
+        model_parallel_is_initialized,
+        tensor_model_parallel_all_gather,
+    )
+
+    SGLANG_DIST_AVAILABLE = True
+
+except:
+    SGLANG_DIST_AVAILABLE = False
+
+
+def get_local_rank():
+    if SGLANG_DIST_AVAILABLE:
+        return (
+            get_tensor_model_parallel_rank() if model_parallel_is_initialized() else 0
+        )
+    else:
+        return 0
 
 
 @dataclass
@@ -333,6 +357,8 @@ class FlashAttentionBackend(AttentionBackend):
             if hasattr(model_runner, "attention_chunk_size")
             else None
         )
+
+        self._last_tick = time.time()
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
         """Initialize forward metadata hence all layers in the forward pass can reuse it."""
@@ -696,6 +722,17 @@ class FlashAttentionBackend(AttentionBackend):
             max_seqlen_k = metadata.max_seq_len_k
             cu_seqlens_k = metadata.cu_seqlens_k
 
+        run_benchmark = (
+            (not torch.cuda.is_current_stream_capturing())
+            and os.getenv("HIP_DEBUG_BENCH", "0") == "1"
+            and (get_local_rank() == 0)
+        )
+
+        if run_benchmark:
+            start_event = torch.cuda.Event(True)
+            end_event = torch.cuda.Event(True)
+            start_event.record()
+
         # Use Flash Attention for prefill
         if not self.use_mla:
             # Do multi-head attention
@@ -803,6 +840,21 @@ class FlashAttentionBackend(AttentionBackend):
                         causal=True,
                         return_softmax_lse=True,
                     )
+
+                if run_benchmark:
+                    from hip_attn.v1_2.utils import capture
+
+                    end_event.record()
+                    end_event.synchronize()
+
+                    elapsed = start_event.elapsed_time(end_event)
+                    elapsed_layer = (time.time() - self._last_tick) * 1000
+                    self._last_tick = time.time()
+                    capture.report()
+                    print(
+                        f"[fa3] layer {layer.layer_id} took {elapsed:.2f} ms (from last tick: {elapsed_layer:.2f} ms)"
+                    )
+
                 return output, lse
             else:
                 # Do absorbed multi-latent attention
@@ -875,6 +927,16 @@ class FlashAttentionBackend(AttentionBackend):
                     )
                 else:
                     o = result
+
+        if run_benchmark:
+            from hip_attn.v1_2.utils import capture
+
+            end_event.record()
+            end_event.synchronize()
+
+            elapsed = start_event.elapsed_time(end_event)
+            capture.report()
+            print(f"[fa3] layer {layer.layer_id} took {elapsed:.2f} ms")
 
         return o.view(-1, layer.tp_q_head_num * layer.v_head_dim)
 
