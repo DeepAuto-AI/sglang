@@ -79,7 +79,18 @@ class HiPAttentionBackend(AttentionBackend):
         self.page_size = model_runner.page_size
         assert self.page_size == 1
 
-        self.forward_paged_hip = PagedHiPStateful()
+        self.forward_paged_hip = PagedHiPStateful(
+            max_batch_size=32,
+            num_layers=model_runner.model_config.num_hidden_layers,
+            num_heads=model_runner.model_config.num_attention_heads
+            // model_runner.tp_size,
+            head_dim=(
+                model_runner.model_config.head_dim
+                if not hasattr(model_runner.model_config, "v_head_dim")
+                else model_runner.model_config.v_head_dim
+            ),
+            device=model_runner.device,
+        )
 
         self.hip_config: HiPAttentionConfig = (
             model_runner.server_args.hip_attention_config
@@ -107,13 +118,25 @@ class HiPAttentionBackend(AttentionBackend):
         self._block_table: torch.Tensor = None
 
     def init_forward_metadata(self, forward_batch: ForwardBatch):
-        self._block_table = forward_batch.req_to_token_pool.req_to_token.index_select(
+        _table = self.flashattention_backend.req_to_token.index_select(
             dim=0, index=forward_batch.req_pool_indices
         )
+
+        if self._block_table is not None:
+            self._block_table[: _table.shape[0]] = _table
+        else:
+            self._block_table = _table
 
         self.flashattention_backend.init_forward_metadata(forward_batch=forward_batch)
 
     def init_cuda_graph_state(self, max_bs: int):
+        self._block_table = torch.zeros(
+            max_bs,
+            (self.max_context_len + self.page_size - 1) // self.page_size + 4,
+            dtype=torch.int32,
+            device=self.flashattention_backend.device,
+        )
+
         self.flashattention_backend.init_cuda_graph_state(
             max_bs=max_bs,
         )
@@ -128,6 +151,11 @@ class HiPAttentionBackend(AttentionBackend):
         forward_mode: ForwardMode,
         spec_info: Optional[SpecInfo],
     ):
+        _table = self.flashattention_backend.req_to_token.index_select(
+            dim=0, index=req_pool_indices
+        )
+        self._block_table[: _table.shape[0]] = _table
+
         self.flashattention_backend.init_forward_metadata_capture_cuda_graph(
             bs=bs,
             num_tokens=num_tokens,
@@ -150,6 +178,11 @@ class HiPAttentionBackend(AttentionBackend):
         seq_lens_cpu: Optional[torch.Tensor],
         out_cache_loc: torch.Tensor = None,
     ):
+        _table = self.flashattention_backend.req_to_token.index_select(
+            dim=0, index=req_pool_indices
+        )
+        self._block_table[: _table.shape[0]] = _table
+
         self.flashattention_backend.init_forward_metadata_replay_cuda_graph(
             bs=bs,
             req_pool_indices=req_pool_indices,
@@ -161,6 +194,30 @@ class HiPAttentionBackend(AttentionBackend):
             seq_lens_cpu=seq_lens_cpu,
             out_cache_loc=out_cache_loc,
         )
+
+        # print(seq_lens)
+        # cache_seqlens = seq_lens[:bs].to(torch.int32)
+        # print(cache_seqlens.shape)
+        # cu_seqlens_q = torch.arange(
+        #     0,
+        #     bs + 1,
+        #     1,
+        #     device=seq_lens.device,
+        #     dtype=torch.int32
+        # )
+        # print(cu_seqlens_q.shape)
+        # cu_seqlens_k = cu_seqlens_q.clone()
+        # cu_seqlens_k[1:] = cache_seqlens.cumsum(-1)
+
+        # fa3_cache_seqlens=self.flashattention_backend.forward_metadata.cache_seqlens_int32[:bs]
+        # fa3_cu_seqlens_q=self.flashattention_backend.forward_metadata.cu_seqlens_q[:bs+1]
+        # fa3_cu_seqlens_k=self.flashattention_backend.forward_metadata.cu_seqlens_k[:bs+1]
+
+        # print(seq_lens[:bs], fa3_cache_seqlens, fa3_cu_seqlens_q, fa3_cu_seqlens_k)
+
+        # assert torch.all(fa3_cache_seqlens == cache_seqlens)
+        # assert torch.all(fa3_cu_seqlens_q == cu_seqlens_q)
+        # assert torch.all(fa3_cu_seqlens_k == cu_seqlens_k)
 
     def get_cuda_graph_seq_len_fill_value(self):
         assert self.flashattention_backend.get_cuda_graph_seq_len_fill_value() == 0
@@ -312,7 +369,7 @@ class HiPAttentionBackend(AttentionBackend):
                     seq_lens=forward_batch.seq_lens,
                     req_to_tokens=forward_batch.req_to_token_pool.req_to_token,
                     req_pool_indices=forward_batch.req_pool_indices,
-                    block_table=self._block_table,
+                    block_table=self._block_table[: forward_batch.batch_size],
                     rope_cos=layer.rope_cos,
                     rope_sin=layer.rope_sin,
                     rope_range=layer.rope_range,
@@ -323,6 +380,7 @@ class HiPAttentionBackend(AttentionBackend):
                     max_context_len=self.max_context_len,
                     extend_seq_lens=forward_batch.extend_seq_lens,
                     extend_seq_lens_cpu=forward_batch.extend_seq_lens_cpu,
+                    extend_prefix_lens_cpu=forward_batch.extend_prefix_lens_cpu,
                     hip_config=self.hip_config,
                     is_kv_cache_offload_enabled=self.is_kv_cache_offload_enabled,
                     online_update_cache=(
@@ -334,6 +392,7 @@ class HiPAttentionBackend(AttentionBackend):
                     offloading_metadata=offloading_metadata,
                     sliding_window_size=sw_size,
                     using_chunked_sliding_window=using_chunked_sw,
+                    self_extend_scale=self.hip_config.self_extend_scale,
                 )
             else:
                 if (
@@ -368,7 +427,7 @@ class HiPAttentionBackend(AttentionBackend):
                         seq_lens=forward_batch.seq_lens,
                         req_to_tokens=forward_batch.req_to_token_pool.req_to_token,
                         req_pool_indices=forward_batch.req_pool_indices,
-                        block_table=self._block_table,
+                        block_table=self._block_table[: forward_batch.batch_size],
                         rope_cos=layer.rope_cos,
                         rope_sin=layer.rope_sin,
                         rope_range=layer.rope_range,
@@ -379,6 +438,7 @@ class HiPAttentionBackend(AttentionBackend):
                         max_context_len=self.max_context_len,
                         extend_seq_lens=forward_batch.extend_seq_lens,
                         extend_seq_lens_cpu=forward_batch.extend_seq_lens_cpu,
+                        extend_prefix_lens_cpu=forward_batch.extend_prefix_lens_cpu,
                         hip_config=self.hip_config,
                         is_kv_cache_offload_enabled=self.is_kv_cache_offload_enabled,
                         cached_metadata=None,
@@ -391,6 +451,7 @@ class HiPAttentionBackend(AttentionBackend):
                         offloading_metadata=offloading_metadata,
                         sliding_window_size=sw_size,
                         using_chunked_sliding_window=using_chunked_sw,
+                        self_extend_scale=self.hip_config.self_extend_scale,
                     )
                 else:
                     # Do absorbed multi-latent attention
@@ -465,7 +526,7 @@ class HiPAttentionBackend(AttentionBackend):
                         seq_lens=forward_batch.seq_lens,
                         req_to_tokens=forward_batch.req_to_token_pool.req_to_token,
                         req_pool_indices=forward_batch.req_pool_indices,
-                        block_table=self._block_table,
+                        block_table=self._block_table[: forward_batch.batch_size],
                         rope_cos=layer.rope_cos,
                         rope_sin=layer.rope_sin,
                         rope_range=layer.rope_range,
@@ -487,6 +548,7 @@ class HiPAttentionBackend(AttentionBackend):
                         sliding_window_size=sw_size,
                         sliding_window_sink=sw_sink,
                         using_chunked_sliding_window=using_chunked_sw,
+                        self_extend_scale=self.hip_config.self_extend_scale,
                     )
 
                     if require_metadata_checkout and (metadata is not None):
@@ -496,6 +558,7 @@ class HiPAttentionBackend(AttentionBackend):
                             batch_size=forward_batch.batch_size,
                             metadata=metadata,
                             block_size_q=self.hip_config.block_sparse_block_size_q,
+                            cached_stages=forward_batch.hip_metadata_cached_stages,
                         )
 
                         if self.is_kv_cache_offload_enabled:
@@ -529,7 +592,6 @@ class HiPAttentionBackend(AttentionBackend):
         q_rope: Optional[torch.Tensor] = None,
         k_rope: Optional[torch.Tensor] = None,
     ):
-
         cache_loc = (
             forward_batch.out_cache_loc
             if not layer.is_cross_attention
@@ -558,7 +620,7 @@ class HiPAttentionBackend(AttentionBackend):
         need_dense_prefill = using_chunked_sw or using_dense_prefill
         need_dense_decode = using_chunked_sw or delta_dense_decode or force_dense_decode
 
-        if need_dense_decode or False:
+        if need_dense_decode and False:
             o = self.flashattention_backend.forward_decode(
                 q=q,
                 k=k,
@@ -571,7 +633,9 @@ class HiPAttentionBackend(AttentionBackend):
                 k_rope=k_rope,
             )
         else:
-            if forward_batch.hip_metadata_cache_pool is not None:
+            if (forward_batch.hip_metadata_cache_pool is not None) and (
+                not delta_dense_decode
+            ):
                 metadata = forward_batch.hip_metadata_cache_pool.get_hip_metadata_cache(
                     layer.layer_id,
                     q.shape[0],
@@ -631,18 +695,54 @@ class HiPAttentionBackend(AttentionBackend):
                     forward_batch.token_to_kv_pool.get_kv_buffer(layer.layer_id)
                 )
 
+            if layer.layer_id == 0:
+                self.cache_seqlens = (
+                    forward_batch.positions.view(forward_batch.batch_size, -1)[:, -1]
+                    + 1
+                ).to(torch.int32)
+                self.cu_seqlens_q = torch.arange(
+                    0,
+                    forward_batch.batch_size + 1,
+                    q.shape[0] // forward_batch.batch_size,
+                    device=q.device,
+                    dtype=torch.int32,
+                )
+                self.cu_seqlens_k = self.cu_seqlens_q.clone()
+                self.cu_seqlens_k[1:] = self.cache_seqlens.cumsum(-1)
+
             if not self.use_mla:
+                k_descale = v_descale = None
                 if k_cache is not None:
                     if k_cache.dtype not in [
                         torch.float32,
                         torch.float16,
                         torch.bfloat16,
                     ]:
-                        assert layer.k_scale is not None, "fp8 scale should be handled"
+                        assert k_cache.dtype in (
+                            torch.float8_e5m2,
+                            torch.float8_e4m3fn,
+                        ), k_cache.dtype
+                        if layer.k_scale is not None:
+                            descale_shape = (
+                                forward_batch.batch_size,
+                                layer.tp_k_head_num,
+                            )
+                            k_descale = layer.k_scale.expand(descale_shape)
+                            v_descale = layer.v_scale.expand(descale_shape)
+                            # q = q.to(k_cache.dtype)
+                        # assert layer.k_scale is not None, "fp8 scale should be handled"
 
                 q_reshaped = q.reshape(-1, layer.tp_q_head_num, layer.head_dim)
                 k_reshaped = k.reshape(-1, layer.tp_k_head_num, layer.head_dim)
                 v_reshaped = v.reshape(-1, layer.tp_v_head_num, layer.v_head_dim)
+
+                # fa3_cache_seqlens=self.flashattention_backend.forward_metadata.cache_seqlens_int32
+                # fa3_cu_seqlens_q=self.flashattention_backend.forward_metadata.cu_seqlens_q
+                # fa3_cu_seqlens_k=self.flashattention_backend.forward_metadata.cu_seqlens_k
+
+                # assert torch.all(fa3_cache_seqlens == cache_seqlens)
+                # assert torch.all(fa3_cu_seqlens_q == cu_seqlens_q)
+                # assert torch.all(fa3_cu_seqlens_k == cu_seqlens_k)
 
                 o, metadata = self.forward_paged_hip(
                     query=q_reshaped,
@@ -657,7 +757,7 @@ class HiPAttentionBackend(AttentionBackend):
                     seq_lens=forward_batch.seq_lens,
                     req_to_tokens=forward_batch.req_to_token_pool.req_to_token,
                     req_pool_indices=forward_batch.req_pool_indices,
-                    block_table=self._block_table,
+                    block_table=self._block_table[: forward_batch.batch_size],
                     rope_cos=layer.rope_cos,
                     rope_sin=layer.rope_sin,
                     rope_range=layer.rope_range,
@@ -678,8 +778,25 @@ class HiPAttentionBackend(AttentionBackend):
                     offloading_metadata=offloading_metadata,
                     sliding_window_size=sw_size,
                     using_chunked_sliding_window=using_chunked_sw,
+                    k_descale=k_descale,
+                    v_descale=v_descale,
+                    # cache_seqlens=self.flashattention_backend.forward_metadata.cache_seqlens_int32[:forward_batch.batch_size],
+                    # cu_seqlens_q=self.flashattention_backend.forward_metadata.cu_seqlens_k[:forward_batch.batch_size + 1],
+                    # cu_seqlens_k=self.flashattention_backend.forward_metadata.cu_seqlens_q[:forward_batch.batch_size + 1],
+                    cache_seqlens=self.cache_seqlens,
+                    cu_seqlens_q=self.cu_seqlens_q,
+                    cu_seqlens_k=self.cu_seqlens_k,
+                    self_extend_scale=self.hip_config.self_extend_scale,
                 )
             else:
+                if k_cache is not None:
+                    if k_cache.dtype not in [
+                        torch.float32,
+                        torch.float16,
+                        torch.bfloat16,
+                    ]:
+                        assert k_cache.dtype in (torch.float8_e5m2, torch.float8_e4m3fn)
+                        assert layer.k_scale is not None, "fp8 scale should be handled"
                 # print(q.shape, k.shape, q_rope.shape, k_rope.shape)
                 # torch.Size([1, 16, 512]) torch.Size([1, 1, 512]) torch.Size([1, 16, 64]) torch.Size([1, 1, 64])
 
@@ -732,7 +849,7 @@ class HiPAttentionBackend(AttentionBackend):
                     seq_lens=forward_batch.seq_lens,
                     req_to_tokens=forward_batch.req_to_token_pool.req_to_token,
                     req_pool_indices=forward_batch.req_pool_indices,
-                    block_table=self._block_table,
+                    block_table=self._block_table[: forward_batch.batch_size],
                     rope_cos=layer.rope_cos,
                     rope_sin=layer.rope_sin,
                     rope_range=layer.rope_range,
@@ -753,10 +870,16 @@ class HiPAttentionBackend(AttentionBackend):
                     offloading_metadata=offloading_metadata,
                     sliding_window_size=sw_size,
                     using_chunked_sliding_window=using_chunked_sw,
+                    cache_seqlens=self.cache_seqlens,
+                    cu_seqlens_q=self.cu_seqlens_q,
+                    cu_seqlens_k=self.cu_seqlens_k,
+                    self_extend_scale=self.hip_config.self_extend_scale,
                 )
 
-            if (metadata is not None) and (
-                forward_batch.hip_metadata_cache_pool is not None
+            if (
+                (metadata is not None)
+                and (forward_batch.hip_metadata_cache_pool is not None)
+                and (not delta_dense_decode)
             ):
                 forward_batch.hip_metadata_cache_pool.set_hip_metadata_cache(
                     layer_id=layer.layer_id,
@@ -764,6 +887,7 @@ class HiPAttentionBackend(AttentionBackend):
                     batch_size=forward_batch.batch_size,
                     metadata=metadata,
                     block_size_q=self.hip_config.block_sparse_block_size_q,
+                    cached_stages=forward_batch.hip_metadata_cached_stages,
                 )
 
                 if self.is_kv_cache_offload_enabled:

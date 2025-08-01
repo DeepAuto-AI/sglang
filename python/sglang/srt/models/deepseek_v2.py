@@ -16,6 +16,7 @@
 # https://github.com/vllm-project/vllm/blob/fb6af8bc086328ca6659e72d11ffd4309ce4de22/vllm/model_executor/models/deepseek_v2.py
 """Inference-only DeepseekV2 model."""
 
+import copy
 import logging
 import os
 from dataclasses import dataclass
@@ -1094,6 +1095,9 @@ class DeepseekV2AttentionMLA(nn.Module):
             self.attn_mha, forward_batch.out_cache_loc, latent_cache, None
         )
 
+        k_current = k
+        v_current = v
+
         # Fetch latent cache from memory pool with precomputed chunked kv indices
         latent_cache_buf = forward_batch.token_to_kv_pool.get_key_buffer(
             self.attn_mha.layer_id
@@ -1110,13 +1114,23 @@ class DeepseekV2AttentionMLA(nn.Module):
             chunk_len = forward_batch.extend_seq_lens_cpu[ibatch]
 
             q_chunk = q[acc_chunk_len : acc_chunk_len + chunk_len][None, ...]
+            k_chunk = k_current[acc_chunk_len : acc_chunk_len + chunk_len][None, ...]
+            v_chunk = v_current[acc_chunk_len : acc_chunk_len + chunk_len][None, ...]
 
             acc_chunk_len += chunk_len
 
-            latent_cache = latent_cache_buf[
-                block_table[ibatch : ibatch + 1, : prefix_len + chunk_len]
-            ]
-
+            if latent_cache_buf.dtype in (torch.float8_e5m2,):
+                latent_cache = (
+                    latent_cache_buf.view(torch.uint8)[
+                        block_table[ibatch : ibatch + 1, :prefix_len]
+                    ]
+                    .view(latent_cache_buf.dtype)
+                    .to(q_chunk.dtype)
+                )
+            else:
+                latent_cache = latent_cache_buf[
+                    block_table[ibatch : ibatch + 1, :prefix_len]
+                ]
             kv_a_normed, k_pe = latent_cache.split(
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
             )
@@ -1128,7 +1142,7 @@ class DeepseekV2AttentionMLA(nn.Module):
             v = kv[..., self.qk_nope_head_dim :]
             k_nope = kv[..., : self.qk_nope_head_dim]
 
-            k = torch.empty(
+            k = torch.zeros(
                 (
                     k_nope.shape[0],
                     self.num_local_heads,
@@ -1139,6 +1153,40 @@ class DeepseekV2AttentionMLA(nn.Module):
             )
             k[..., : self.qk_nope_head_dim] = k_nope
             k[..., self.qk_nope_head_dim :] = k_pe
+
+            # k = k[:-k_chunk.shape[1]]
+            # v = v[:-k_chunk.shape[1]]
+
+            k = torch.cat([k, k_chunk[0]], dim=0)
+            v = torch.cat([v, v_chunk[0]], dim=0)
+
+            current_forward_batch = copy.copy(forward_batch)
+            current_forward_batch.batch_size = 1
+            current_forward_batch.req_pool_indices = forward_batch.req_pool_indices[
+                ibatch : ibatch + 1
+            ]
+            current_forward_batch.extend_seq_lens = forward_batch.extend_seq_lens[
+                ibatch : ibatch + 1
+            ]
+            current_forward_batch.extend_seq_lens_cpu = (
+                forward_batch.extend_seq_lens_cpu[ibatch : ibatch + 1]
+            )
+            current_forward_batch.extend_prefix_lens_cpu = (
+                forward_batch.extend_prefix_lens_cpu[ibatch : ibatch + 1]
+            )
+            current_forward_batch.positions = forward_batch.positions[
+                acc_chunk_len : acc_chunk_len + chunk_len
+            ]
+            assert current_forward_batch.extend_prefix_lens_cpu is not None
+            # cache_loc = (
+            #     forward_batch.out_cache_loc
+            #     if not layer.is_cross_attention
+            #     else forward_batch.encoder_out_cache_loc
+            # )
+            assert not self.attn_mha.is_cross_attention
+            current_forward_batch.out_cache_loc = forward_batch.out_cache_loc[
+                acc_chunk_len : acc_chunk_len + chunk_len
+            ]
 
             output = self.attn_mha(q_chunk, k, v, forward_batch, save_kv_cache=False)
 
@@ -1164,9 +1212,19 @@ class DeepseekV2AttentionMLA(nn.Module):
             latent_cache_buf = forward_batch.token_to_kv_pool.get_key_buffer(
                 self.attn_mha.layer_id
             )
-            latent_cache = latent_cache_buf[
-                forward_batch.prefix_chunk_kv_indices[i]
-            ].contiguous()
+            if latent_cache_buf.dtype in (torch.float8_e5m2,):
+                latent_cache = (
+                    latent_cache_buf.view(torch.uint8)[
+                        forward_batch.prefix_chunk_kv_indices[i]
+                    ]
+                    .view(latent_cache_buf.dtype)
+                    .to(q.dtype)
+                    .contiguous()
+                )
+            else:
+                latent_cache = latent_cache_buf[
+                    forward_batch.prefix_chunk_kv_indices[i]
+                ].contiguous()
 
             kv_a_normed, k_pe = latent_cache.split(
                 [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
