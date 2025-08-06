@@ -1740,9 +1740,7 @@ class ModelRunner:
 
     def _get_attention_backend_from_str(self, backend_str: str):
         if backend_str == "hip_attention":
-            from sglang.srt.layers.attention.hip_attention import (
-                HiPAttentionBackend,
-            )
+            from sglang.srt.layers.attention.hip_attention import HiPAttentionBackend
 
             return HiPAttentionBackend(self)
         elif backend_str == "flashinfer":
