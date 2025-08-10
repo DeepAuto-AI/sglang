@@ -215,6 +215,7 @@ class KimiDetector(BaseReasoningFormatDetector):
             stream_reasoning=stream_reasoning,
         )
 
+
 class GptOssDetector(BaseReasoningFormatDetector):
     """
     Detector for GPT-OSS model.
@@ -232,6 +233,7 @@ class GptOssDetector(BaseReasoningFormatDetector):
             force_reasoning=False,
             stream_reasoning=stream_reasoning,
         )
+
 
 class ReasoningParser:
     """
