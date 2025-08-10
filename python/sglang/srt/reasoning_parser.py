@@ -230,7 +230,7 @@ class GptOssDetector(BaseReasoningFormatDetector):
         super().__init__(
             "<|channel|>analysis<|message|>",
             "<|channel|>final<|message|>",
-            force_reasoning=False,
+            force_reasoning=True,
             stream_reasoning=stream_reasoning,
         )
 
