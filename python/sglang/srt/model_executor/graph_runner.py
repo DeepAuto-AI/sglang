@@ -85,6 +85,7 @@ def get_local_rank() -> 0:
     else:
         return 0
 
+
 if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
 
@@ -510,7 +511,7 @@ class GraphRunner:
                         capture_range.set_description(
                             f"Capturing batches ({bs=} {avail_mem=:.2f} GB)"
                         )
-                    
+
                     for capture_config in self.capture_configs:
                         with patch_model(
                             self.model_runner.model,
@@ -622,7 +623,7 @@ class GraphRunner:
             lora_ids = [None] * bs
         else:
             lora_ids = None
-        
+
         hip_num_cached_stages = None
         if self.enable_hip_attention:
             (hip_num_cached_stages,) = capture_config
