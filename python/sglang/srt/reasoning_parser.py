@@ -339,9 +339,13 @@ class GptOssDetector(BaseReasoningFormatDetector):
 
         # Process full_normal_text for final output
         normal_text = ""
-        if self.final_channel_start in full_normal_text:
-            final_start = full_normal_text.find(self.final_channel_start)
-            final_content_start = final_start + len(self.final_channel_start)
+        if (self.final_channel_start in full_normal_text) or ("<|channel|>final<|message|>" in full_normal_text):
+            if self.final_channel_start in full_normal_text:
+                keyword = self.final_channel_start
+            elif "<|channel|>final<|message|>" in full_normal_text:
+                keyword = "<|channel|>final<|message|>"
+            final_start = full_normal_text.find(keyword)
+            final_content_start = final_start + len(keyword)
             final_end = full_normal_text.find(
                 self.final_channel_end, final_content_start
             )
@@ -368,11 +372,11 @@ class GptOssDetector(BaseReasoningFormatDetector):
             else:
                 # Final channel not complete - extract what we have
                 # Look for just <|channel|>final<|message|> without <|return|>
-                alt_final_start = full_normal_text.find(self.final_channel_start)
+                alt_final_start = full_normal_text.find(keyword)
                 if alt_final_start != -1:
                     before_alt_final = full_normal_text[:alt_final_start].strip()
                     alt_final_content = full_normal_text[
-                        alt_final_start + len(self.final_channel_start) :
+                        alt_final_start + len(keyword) :
                     ].strip()
 
                     parts = []
