@@ -339,7 +339,9 @@ class GptOssDetector(BaseReasoningFormatDetector):
 
         # Process full_normal_text for final output
         normal_text = ""
-        if (self.final_channel_start in full_normal_text) or ("<|channel|>final<|message|>" in full_normal_text):
+        if (self.final_channel_start in full_normal_text) or (
+            "<|channel|>final<|message|>" in full_normal_text
+        ):
             if self.final_channel_start in full_normal_text:
                 keyword = self.final_channel_start
             elif "<|channel|>final<|message|>" in full_normal_text:
