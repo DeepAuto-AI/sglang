@@ -228,9 +228,6 @@ class Qwen2DecoderLayer(nn.Module):
             rope_scaling=rope_scaling,
             max_position_embeddings=max_position_embeddings,
             quant_config=quant_config,
-            previous_layer=(
-                previous_layer.self_attn if previous_layer is not None else None
-            ),
             prefix=add_prefix("self_attn", prefix),
         )
         self.mlp = Qwen2MLP(

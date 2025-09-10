@@ -152,15 +152,82 @@ def smart_nframes(
 # process video, qwen-specific
 async def preprocess_video(
     vr,
+    frame_selection_method: str,
+    aks_clip_processor: torch.nn.Module = None,
+    aks_clip_model: torch.nn.Module = None,
     image_factor: int = IMAGE_FACTOR,
     # vr: VideoReader, image_factor: int = IMAGE_FACTOR
 ) -> torch.Tensor:
+    vr, vr_cpu = vr
+
     ele = {}
     total_frames, video_fps = len(vr), vr.get_avg_fps()
-    nframes = smart_nframes({}, total_frames=total_frames, video_fps=video_fps)
-    idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
-    video = vr.get_batch(idx).asnumpy()
-    video = torch.tensor(video).permute(0, 3, 1, 2)  # Convert to TCHW format
+
+    torch.cuda.set_sync_debug_mode("warn")
+
+    if os.environ.get("NFRAMES") is not None:
+        nframes = int(os.environ.get("NFRAMES"))
+    else:
+        print("NFRAMES is not set; deciding dynamically based on fps and total_frames")
+        nframes = smart_nframes({}, total_frames=total_frames, video_fps=video_fps)
+
+    print(f"!!! Using nframes: {nframes}")
+    question = "What is the visual content of the video?"  # TODO: replace with actual question
+
+    if frame_selection_method == "uniform":
+        idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
+
+    elif frame_selection_method == "aks":
+        from lmms_eval.frame_selection_utils.pipelines.pipeline_utils \
+            import (
+                cosine_similarity,
+                dense_sample_frames,
+                select_visuals,
+            )
+
+        print("!!! AKS start " + "="*80)
+
+        device = "cuda:0"
+        sampling_rate = float(os.environ.get("AKS_SAMPLING_RATE", "1.0"))
+        batch_size = int(os.environ.get("AKS_BATCH_SIZE", "1024"))
+        method = os.environ.get("AKS_METHOD", "aks")
+        max_iterations = int(os.environ.get("AKS_MAX_ITERATIONS", "3"))
+        gap_threshold = float(os.environ.get("AKS_GAP_THRESHOLD", "0.2"))
+
+        with torch.no_grad():
+            # 1. Prepare candidate visuals
+            frames, candidate_visual_indices = dense_sample_frames(vr, sampling_rate)
+            candidate_visual = aks_clip_processor(images=frames, return_tensors="pt")
+
+            # 2. Score candidate visuals
+            visual_features = []
+            for s in range(0, len(candidate_visual["pixel_values"]), batch_size):
+                e = min(s + batch_size, len(candidate_visual["pixel_values"]))
+                batch_pixel_values = candidate_visual["pixel_values"][s:e]
+                features = aks_clip_model.get_image_features(pixel_values=batch_pixel_values)
+                visual_features.append(features)
+            visual_features = torch.cat(visual_features, dim=0)
+            text_inputs = aks_clip_processor(text=question, return_tensors="pt").to(device)  # FIXME: synchronization
+            text_features = aks_clip_model.get_text_features(**text_inputs)
+            clip_scores = cosine_similarity(text_features, visual_features).cpu().numpy()
+
+            # 3. Select frames
+            selected_frame_indices = select_visuals(
+                clip_scores,
+                candidate_visual_indices,
+                nframes,
+                method=method,
+                max_iterations=max_iterations,
+                gap_threshold=gap_threshold,
+            )
+            selected_frame_indices.sort()
+
+        idx = selected_frame_indices
+        print("!!! AKS end " + "="*80)
+
+    video = vr.get_batch(idx)
+    assert isinstance(video, torch.Tensor), f"video should be torch.Tensor, but got {type(video)}"
+    video = video.permute(0, 3, 1, 2)  # Convert to TCHW format
     nframes, _, height, width = video.shape
     min_pixels = ele.get("min_pixels", VIDEO_MIN_PIXELS)
     total_pixels = ele.get("total_pixels", VIDEO_TOTAL_PIXELS)
@@ -194,6 +261,9 @@ async def preprocess_video(
         interpolation=InterpolationMode.BICUBIC,
         antialias=True,
     ).float()
+
+    torch.cuda.set_sync_debug_mode("default")
+
     return video
 
 
@@ -222,6 +292,21 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
             video_token_id=hf_config.video_token_id,
         ).build(_processor)
 
+        self.frame_selection_method = os.environ.get("FRAME_SELECTION_METHOD", "uniform")
+        print(f"!!! Using frame selection method: {self.frame_selection_method}")
+
+        self.frame_selection_args = {}
+        if self.frame_selection_method == "aks":
+            from transformers import CLIPProcessor, CLIPModel
+            aks_model_card = os.environ.get("AKS_MODEL_CARD")
+            assert aks_model_card is not None, "AKS_MODEL_CARD is not set"
+            self.frame_selection_args = dict(
+                aks_clip_processor=CLIPProcessor.from_pretrained(aks_model_card, use_fast=True),
+                aks_clip_model=CLIPModel.from_pretrained(aks_model_card, device_map={
+                    '': 0
+                }).eval()
+            )
+
     async def process_mm_data_async(
         self,
         image_data: List[Union[str, bytes]],
@@ -246,7 +331,12 @@ class Qwen2_5VLImageProcessor(SGLangBaseProcessor):
         videos = None
         if base_output.videos:
             base_output.videos = [
-                await preprocess_video(video) for video in base_output.videos
+                await preprocess_video(
+                    video,
+                    frame_selection_method=self.frame_selection_method,
+                    **self.frame_selection_args
+                )
+                for video in base_output.videos
             ]
 
         mm_items, input_ids, ret = self.process_and_combine_mm_data(

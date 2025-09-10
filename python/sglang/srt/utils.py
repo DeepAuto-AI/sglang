@@ -15,6 +15,9 @@
 
 from __future__ import annotations
 
+import decord
+decord.bridge.set_bridge('torch')
+
 import asyncio
 import builtins
 import ctypes
@@ -76,7 +79,6 @@ import torch.distributed
 import torch.distributed as dist
 import triton
 import zmq
-from decord import VideoReader, cpu, gpu
 from fastapi.responses import ORJSONResponse
 from packaging import version as pkg_version
 from PIL import Image
@@ -788,22 +790,16 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
     # We import decord here to avoid a strange Segmentation fault (core dumped) issue.
     from decord import VideoReader, cpu, gpu
 
-    try:
-        from decord.bridge import decord_bridge
-
-        ctx = gpu(0)
-        _ = decord_bridge.get_ctx_device(ctx)
-    except Exception:
-        ctx = cpu(0)
+    ctx = gpu(0)
 
     tmp_file = None
-    vr = None
     try:
+        video_file_name = None
         if isinstance(video_file, bytes):
             tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
             tmp_file.write(video_file)
             tmp_file.close()
-            vr = VideoReader(tmp_file.name, ctx=ctx)
+            video_file_name = tmp_file.name
         elif isinstance(video_file, str):
             if video_file.startswith(("http://", "https://")):
                 timeout = int(os.getenv("REQUEST_TIMEOUT", "10"))
@@ -813,26 +809,29 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
                 for chunk in response.iter_content(chunk_size=8192):
                     tmp_file.write(chunk)
                 tmp_file.close()
-                vr = VideoReader(tmp_file.name, ctx=ctx)
+                video_file_name = tmp_file.name
             elif video_file.startswith("data:"):
                 _, encoded = video_file.split(",", 1)
                 video_bytes = pybase64.b64decode(encoded)
                 tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
                 tmp_file.write(video_bytes)
                 tmp_file.close()
-                vr = VideoReader(tmp_file.name, ctx=ctx)
+                video_file_name = tmp_file.name
             elif os.path.isfile(video_file):
-                vr = VideoReader(video_file, ctx=ctx)
+                video_file_name = video_file
             else:
                 video_bytes = pybase64.b64decode(video_file)
                 tmp_file = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
                 tmp_file.write(video_bytes)
                 tmp_file.close()
-                vr = VideoReader(tmp_file.name, ctx=ctx)
+                video_file_name = tmp_file.name
         else:
             raise ValueError(f"Unsupported video input type: {type(video_file)}")
 
-        return vr
+        vr = VideoReader(video_file_name, ctx=ctx)
+        vr_cpu = VideoReader(video_file_name, ctx=cpu(0))
+
+        return vr, vr_cpu
 
     finally:
         if tmp_file and os.path.exists(tmp_file.name):
