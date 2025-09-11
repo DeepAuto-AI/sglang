@@ -7,7 +7,6 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
 
 import torch
 
-from sglang.srt.layers.linear import LinearBase, set_weight_attrs
 from sglang.srt.layers.parameter import GroupQuantScaleParameter, PackedvLLMParameter
 from sglang.srt.layers.quantization.base_config import (
     FusedMoEMethodBase,
@@ -260,6 +259,7 @@ class AWQMarlinConfig(QuantizationConfig):
     ) -> Optional[QuantizeMethodBase]:
         from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
         from sglang.srt.layers.vocab_parallel_embedding import ParallelLMHead
+        from sglang.srt.layers.linear import LinearBase, set_weight_attrs
 
         if isinstance(layer, LinearBase) or (
             isinstance(layer, ParallelLMHead) and self.lm_head_quantized
@@ -586,6 +586,7 @@ class AWQMoEMethod(FusedMoEMethodBase):
     ):
         # Delay the import to avoid circular dependency
         from sglang.srt.layers.moe.fused_moe_triton import FusedMoeWeightScaleSupported
+        from sglang.srt.layers.linear import LinearBase, set_weight_attrs
 
         extra_weight_attrs.update(
             {

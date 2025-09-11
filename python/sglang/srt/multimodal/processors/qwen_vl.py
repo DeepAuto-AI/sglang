@@ -2,7 +2,9 @@ import asyncio
 import math
 import os
 import re
+import time
 from typing import List, Union
+import nvtx
 
 import torch
 import torchvision
@@ -149,6 +151,28 @@ def smart_nframes(
     return nframes
 
 
+def aks_cand_frame_indices(vr, sampling_rate):
+    fps = vr.get_avg_fps()
+    step = max(int(round(fps / sampling_rate)), 1)
+    num_samples = (len(vr) + step - 1) // step
+    frames_indices = []
+    current_index = 0
+    for i in range(num_samples):
+        if current_index >= len(vr):
+            break
+        frames_indices.append(current_index)
+        current_index += 1
+        if i < num_samples - 1:
+            current_index += step - 1
+    return frames_indices
+
+
+def batched(iterable, n=1):
+    l = len(iterable)
+    for ndx in range(0, l, n):
+        yield iterable[ndx:min(ndx + n, l)]
+
+
 # process video, qwen-specific
 async def preprocess_video(
     vr,
@@ -158,111 +182,127 @@ async def preprocess_video(
     image_factor: int = IMAGE_FACTOR,
     # vr: VideoReader, image_factor: int = IMAGE_FACTOR
 ) -> torch.Tensor:
-    vr, vr_cpu = vr
+    with nvtx.annotate(message="preprocess_video", color="green"):
+        vr, vr_cpu = vr
 
-    ele = {}
-    total_frames, video_fps = len(vr), vr.get_avg_fps()
+        ele = {}
+        total_frames, video_fps = len(vr), vr.get_avg_fps()
 
-    torch.cuda.set_sync_debug_mode("warn")
+        if os.environ.get("NFRAMES") is not None:
+            nframes = int(os.environ.get("NFRAMES"))
+        else:
+            print("NFRAMES is not set; deciding dynamically based on fps and total_frames")
+            nframes = smart_nframes({}, total_frames=total_frames, video_fps=video_fps)
 
-    if os.environ.get("NFRAMES") is not None:
-        nframes = int(os.environ.get("NFRAMES"))
-    else:
-        print("NFRAMES is not set; deciding dynamically based on fps and total_frames")
-        nframes = smart_nframes({}, total_frames=total_frames, video_fps=video_fps)
+        print(f"!!! Using nframes: {nframes}")
+        question = "What is the visual content of the video?"  # TODO: replace with actual question
 
-    print(f"!!! Using nframes: {nframes}")
-    question = "What is the visual content of the video?"  # TODO: replace with actual question
+        if frame_selection_method == "uniform":
+            idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
 
-    if frame_selection_method == "uniform":
-        idx = torch.linspace(0, total_frames - 1, nframes).round().long().tolist()
+        elif frame_selection_method == "aks":
+            from lmms_eval.frame_selection_utils.pipelines.pipeline_utils \
+                import (
+                    cosine_similarity,
+                    select_visuals,
+                )
 
-    elif frame_selection_method == "aks":
-        from lmms_eval.frame_selection_utils.pipelines.pipeline_utils \
-            import (
-                cosine_similarity,
-                dense_sample_frames,
-                select_visuals,
+            print("!!! AKS start " + "="*80)
+
+            device = "cuda:0"
+            sampling_rate = float(os.environ.get("AKS_SAMPLING_RATE", "1.0"))
+            batch_size = int(os.environ.get("AKS_BATCH_SIZE", "16"))
+            method = os.environ.get("AKS_METHOD", "aks")
+            max_iterations = int(os.environ.get("AKS_MAX_ITERATIONS", "3"))
+            gap_threshold = float(os.environ.get("AKS_GAP_THRESHOLD", "0.2"))
+
+            start_time = time.time()
+            with torch.no_grad():
+                with nvtx.annotate(message="Encode text", color="red"):
+                    text_inputs = aks_clip_processor(text=question, return_tensors="pt").to(device)  # FIXME: synchronization
+
+                visual_features = []
+                candidate_visual_indices = []
+                for batch_candidate_visual_indices in batched(aks_cand_frame_indices(vr, sampling_rate), batch_size):
+                    # 1. Prepare candidate visuals
+                    with nvtx.annotate(message="Prepare candidate visuals", color="green"):
+                        frames = vr.get_batch(batch_candidate_visual_indices)
+                    with nvtx.annotate(message="aks_clip_processor", color="red"):
+                        candidate_visual = aks_clip_processor(images=frames, return_tensors="pt")
+
+                    # 2. Score candidate visuals
+                    with nvtx.annotate(message="Score candidate visuals 1", color="green"):
+                        features = aks_clip_model.get_image_features(
+                            pixel_values=candidate_visual["pixel_values"],
+                        )
+                        visual_features.append(features)
+                        candidate_visual_indices.extend(batch_candidate_visual_indices)
+
+                with nvtx.annotate(message="Score candidate visuals 2", color="yellow"):
+                    visual_features = torch.cat(visual_features, dim=0)
+                    text_features = aks_clip_model.get_text_features(**text_inputs)
+                    clip_scores = cosine_similarity(text_features, visual_features)
+
+                    clip_scores = clip_scores.cpu().numpy()  # FIXME: synchronization
+
+                # 3. Select frames
+                with nvtx.annotate(message="Select visuals", color="green"):
+                    selected_frame_indices = select_visuals(
+                        clip_scores,
+                        candidate_visual_indices,
+                        nframes,
+                        method=method,
+                        max_iterations=max_iterations,
+                        gap_threshold=gap_threshold,
+                    )
+                    selected_frame_indices.sort()
+
+            idx = selected_frame_indices
+
+            end_time = time.time()
+            print(f"!!! AKS end | elapsed time: {end_time - start_time}s:")
+
+        start_time = time.time()
+        with nvtx.annotate(message="Fetch frames", color="red"):
+            video = vr.get_batch(idx)
+            assert isinstance(video, torch.Tensor), f"video should be torch.Tensor, but got {type(video)}"
+            video = video.permute(0, 3, 1, 2)  # Convert to TCHW format
+            nframes, _, height, width = video.shape
+            min_pixels = ele.get("min_pixels", VIDEO_MIN_PIXELS)
+            total_pixels = ele.get("total_pixels", VIDEO_TOTAL_PIXELS)
+            max_pixels = max(
+                min(VIDEO_MAX_PIXELS, total_pixels / nframes * FRAME_FACTOR),
+                int(min_pixels * 1.05),
             )
+            max_pixels_supposed = ele.get("max_pixels", max_pixels)
+            if max_pixels_supposed > max_pixels:
+                logger.warning(
+                    f"The given max_pixels[{max_pixels_supposed}] exceeds limit[{max_pixels}]."
+                )
+            max_pixels = min(max_pixels_supposed, max_pixels)
+            if "resized_height" in ele and "resized_width" in ele:
+                resized_height, resized_width = smart_resize(
+                    ele["resized_height"],
+                    ele["resized_width"],
+                    factor=image_factor,
+                )
+            else:
+                resized_height, resized_width = smart_resize(
+                    height,
+                    width,
+                    factor=image_factor,
+                    min_pixels=min_pixels,
+                    max_pixels=max_pixels,
+                )
+            video = torchvision.transforms.functional.resize(
+                video,
+                [resized_height, resized_width],
+                interpolation=InterpolationMode.BICUBIC,
+                antialias=True,
+            ).float()
 
-        print("!!! AKS start " + "="*80)
-
-        device = "cuda:0"
-        sampling_rate = float(os.environ.get("AKS_SAMPLING_RATE", "1.0"))
-        batch_size = int(os.environ.get("AKS_BATCH_SIZE", "1024"))
-        method = os.environ.get("AKS_METHOD", "aks")
-        max_iterations = int(os.environ.get("AKS_MAX_ITERATIONS", "3"))
-        gap_threshold = float(os.environ.get("AKS_GAP_THRESHOLD", "0.2"))
-
-        with torch.no_grad():
-            # 1. Prepare candidate visuals
-            frames, candidate_visual_indices = dense_sample_frames(vr, sampling_rate)
-            candidate_visual = aks_clip_processor(images=frames, return_tensors="pt")
-
-            # 2. Score candidate visuals
-            visual_features = []
-            for s in range(0, len(candidate_visual["pixel_values"]), batch_size):
-                e = min(s + batch_size, len(candidate_visual["pixel_values"]))
-                batch_pixel_values = candidate_visual["pixel_values"][s:e]
-                features = aks_clip_model.get_image_features(pixel_values=batch_pixel_values)
-                visual_features.append(features)
-            visual_features = torch.cat(visual_features, dim=0)
-            text_inputs = aks_clip_processor(text=question, return_tensors="pt").to(device)  # FIXME: synchronization
-            text_features = aks_clip_model.get_text_features(**text_inputs)
-            clip_scores = cosine_similarity(text_features, visual_features).cpu().numpy()
-
-            # 3. Select frames
-            selected_frame_indices = select_visuals(
-                clip_scores,
-                candidate_visual_indices,
-                nframes,
-                method=method,
-                max_iterations=max_iterations,
-                gap_threshold=gap_threshold,
-            )
-            selected_frame_indices.sort()
-
-        idx = selected_frame_indices
-        print("!!! AKS end " + "="*80)
-
-    video = vr.get_batch(idx)
-    assert isinstance(video, torch.Tensor), f"video should be torch.Tensor, but got {type(video)}"
-    video = video.permute(0, 3, 1, 2)  # Convert to TCHW format
-    nframes, _, height, width = video.shape
-    min_pixels = ele.get("min_pixels", VIDEO_MIN_PIXELS)
-    total_pixels = ele.get("total_pixels", VIDEO_TOTAL_PIXELS)
-    max_pixels = max(
-        min(VIDEO_MAX_PIXELS, total_pixels / nframes * FRAME_FACTOR),
-        int(min_pixels * 1.05),
-    )
-    max_pixels_supposed = ele.get("max_pixels", max_pixels)
-    if max_pixels_supposed > max_pixels:
-        logger.warning(
-            f"The given max_pixels[{max_pixels_supposed}] exceeds limit[{max_pixels}]."
-        )
-    max_pixels = min(max_pixels_supposed, max_pixels)
-    if "resized_height" in ele and "resized_width" in ele:
-        resized_height, resized_width = smart_resize(
-            ele["resized_height"],
-            ele["resized_width"],
-            factor=image_factor,
-        )
-    else:
-        resized_height, resized_width = smart_resize(
-            height,
-            width,
-            factor=image_factor,
-            min_pixels=min_pixels,
-            max_pixels=max_pixels,
-        )
-    video = torchvision.transforms.functional.resize(
-        video,
-        [resized_height, resized_width],
-        interpolation=InterpolationMode.BICUBIC,
-        antialias=True,
-    ).float()
-
-    torch.cuda.set_sync_debug_mode("default")
+        end_time = time.time()
+        print(f"!!! Fetch frames end | elapsed time: {end_time - start_time}s:")
 
     return video
 

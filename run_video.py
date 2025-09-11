@@ -24,7 +24,7 @@ for it in range(6):
                     {
                         "type": "video_url",
                         "video_url": {
-                            "url": "/home/geon/86CxyhFV9MI.mp4"
+                            "url": "/home/geon/UO_6TQnnOxM_720p.mp4"
                         },
                     },
                 ],

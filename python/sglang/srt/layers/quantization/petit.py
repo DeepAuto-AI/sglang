@@ -8,7 +8,6 @@ import regex as re
 import torch
 from torch.nn.parameter import Parameter
 
-from sglang.srt.layers.linear import LinearBase, UnquantizedLinearMethod
 from sglang.srt.layers.parameter import ModelWeightParameter, PerTensorScaleParameter
 from sglang.srt.layers.quantization.base_config import (
     LinearMethodBase,
@@ -119,6 +118,7 @@ class PetitNvFp4Config(QuantizationConfig):
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str
     ) -> Optional["QuantizeMethodBase"]:
+        from sglang.srt.layers.linear import LinearBase, UnquantizedLinearMethod
         if isinstance(layer, LinearBase):
             if is_layer_skipped(prefix, self.exclude_modules) or self.is_layer_excluded(
                 prefix, self.exclude_modules
