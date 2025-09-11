@@ -173,6 +173,16 @@ def batched(iterable, n=1):
         yield iterable[ndx:min(ndx + n, l)]
 
 
+def cosine_similarity(a, b):
+    similarity = a @ b.T / (torch.linalg.norm(a) * torch.linalg.norm(b))
+    # Reduce dimensions that have size 1
+    for i in range(len(similarity.shape)):
+        if similarity.shape[i] == 1:
+            similarity = similarity.squeeze(axis=i)
+            break
+    return similarity
+
+
 # process video, qwen-specific
 async def preprocess_video(
     vr,
@@ -202,10 +212,7 @@ async def preprocess_video(
 
         elif frame_selection_method == "aks":
             from lmms_eval.frame_selection_utils.pipelines.pipeline_utils \
-                import (
-                    cosine_similarity,
-                    select_visuals,
-                )
+                import select_visuals
 
             print("!!! AKS start " + "="*80)
 
