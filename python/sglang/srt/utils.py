@@ -789,6 +789,7 @@ def load_image(
 def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
     # We import decord here to avoid a strange Segmentation fault (core dumped) issue.
     from decord import VideoReader, cpu, gpu
+    from byteclip.inference.segment_selection.byteclip.visual_utils import H264Video
 
     ctx = gpu(0)
 
@@ -830,8 +831,9 @@ def load_video(video_file: Union[str, bytes], use_gpu: bool = True):
 
         vr = VideoReader(video_file_name, ctx=ctx)
         vr_cpu = VideoReader(video_file_name, ctx=cpu(0))
+        h264_video = H264Video(video_file_name)
 
-        return vr, vr_cpu
+        return vr, vr_cpu, h264_video
 
     finally:
         if tmp_file and os.path.exists(tmp_file.name):
