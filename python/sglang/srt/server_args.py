@@ -1459,6 +1459,7 @@ class ServerArgs:
             "ascend",
             # HiP Attention (Triton)
             "hip_attention",
+            "refine_attn",
         ]
         parser.add_argument(
             "--attention-backend",
