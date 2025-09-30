@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -39,6 +40,7 @@ class RefineAttnAttnBackend(AttentionBackend):
         scaling=None,
         enable_gqa=False,
         causal=False,
+        layer=None,
     ):
         """Run the extend forward by using torch native sdpa op.
 
@@ -101,6 +103,16 @@ class RefineAttnAttnBackend(AttentionBackend):
             #       f"{per_req_value.shape=}",
             #       f"{per_req_query.shape=}")
 
+            # if (int(os.environ.get("SAVE_QKV", "0")) <= per_req_query_redudant.size(1) and
+            #     int(os.environ.get("SAVE_LAYER_ID", "0")) == layer):
+            #     print("Saving QKV...")
+            #     torch.save({
+            #         'q': per_req_query_redudant.unsqueeze(0),
+            #         'k': per_req_key.unsqueeze(0),
+            #         'v': per_req_value.unsqueeze(0),
+            #     }, "../qkv_out.pth")
+            #     exit(0)
+
             per_req_out_redudant = (
                 refine_attn(
                     per_req_query_redudant.unsqueeze(0),
@@ -110,11 +122,13 @@ class RefineAttnAttnBackend(AttentionBackend):
                     mask=torch.arange(
                         per_req_query_redudant.size(1), device=query.device
                     ).unsqueeze(0),
-                    attn_config=RefineAttnConfig(
-                        xattn_stride=256,
-                        sink_tokens=256,
+                    config=RefineAttnConfig(
+                        xattn_stride=32,
+                        sink_tokens=128,
                         sliding_window_size=2048,
-                        topk_blocks=256,
+                        topk_blocks=2048,
+                        do_threshold=True,
+                        threshold=0.99,
                     ),
                 )
                 .squeeze(0)
@@ -251,6 +265,7 @@ class RefineAttnAttnBackend(AttentionBackend):
             scaling=layer.scaling,
             enable_gqa=use_gqa,
             causal=causal,
+            layer=layer.layer_id,
         )
         return o
 
