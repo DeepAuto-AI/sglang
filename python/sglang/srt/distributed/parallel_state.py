@@ -21,6 +21,7 @@ If you only need to use the distributed environment without model/pipeline
  parallelism, you can skip the model parallel initialization and destruction
  steps.
 """
+import datetime
 import contextlib
 import gc
 import logging
@@ -244,11 +245,11 @@ class GroupCoordinator:
 
         for ranks in group_ranks:
             device_group = torch.distributed.new_group(
-                ranks, backend=torch_distributed_backend
+                ranks, backend=torch_distributed_backend, timeout=datetime.timedelta(seconds=100)
             )
             # a group with `gloo` backend, to allow direct coordination between
             # processes through the CPU.
-            cpu_group = torch.distributed.new_group(ranks, backend="gloo")
+            cpu_group = torch.distributed.new_group(ranks, backend="gloo", timeout=datetime.timedelta(seconds=100))
             if self.rank in ranks:
                 self.ranks = ranks
                 self.world_size = len(ranks)
@@ -1331,6 +1332,9 @@ def init_distributed_environment(
     backend: str = "nccl",
     timeout: Optional[int] = None,
 ):
+    # NOTE: FIXME
+    timeout = 100
+
     logger.debug(
         "world_size=%d rank=%d local_rank=%d " "distributed_init_method=%s backend=%s",
         world_size,
