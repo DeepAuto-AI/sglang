@@ -290,6 +290,7 @@ class HiPAttentionBackend(AttentionBackend):
                 # For multi-head latent attention
                 q_rope=q_rope,
                 k_rope=k_rope,
+                sinks=sinks,
             )
         else:
             if not self.is_kv_cache_offload_enabled:
