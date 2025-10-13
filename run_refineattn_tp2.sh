@@ -25,8 +25,8 @@ python -m sglang.launch_server \
     --port 8090 \
     --model-path meta-llama/Llama-3.1-8B-Instruct \
     --kv-cache-dtype auto \
-    --ep-size 1 \
-    --tp-size 1 \
+    --ep-size 2 \
+    --tp-size 2 \
     --mem-fraction-static 0.65 \
     --chunked-prefill-size 131072 \
     --max-prefill-tokens 131072 \

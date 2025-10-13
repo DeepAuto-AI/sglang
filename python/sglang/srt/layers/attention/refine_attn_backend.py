@@ -122,13 +122,16 @@ class RefineAttnAttnBackend(AttentionBackend):
                     mask=torch.arange(
                         per_req_query_redudant.size(1), device=query.device
                     ).unsqueeze(0),
-                    config=RefineAttnConfig(
-                        xattn_stride=32,
-                        sink_tokens=128,
+                    cfg=RefineAttnConfig(
+                        xattn_stride=64,
+                        q_stride=16,
+                        sink_tokens=64,
                         sliding_window_size=2048,
-                        topk_blocks=2048,
+                        topk_blocks=256,
                         do_threshold=True,
                         threshold=0.99,
+                        est_type="qsa",
+                        debug_use_exact=False,
                     ),
                 )
                 .squeeze(0)
