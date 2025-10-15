@@ -128,9 +128,10 @@ class RefineAttnAttnBackend(AttentionBackend):
                         sink_tokens=64,
                         sliding_window_size=2048,
                         topk_blocks=256,
-                        do_threshold=True,
-                        threshold=0.99,
+                        do_threshold=False,
+                        threshold=1.1,
                         est_type="qsa",
+                        union_factor=4,
                         debug_use_exact=False,
                     ),
                 )
