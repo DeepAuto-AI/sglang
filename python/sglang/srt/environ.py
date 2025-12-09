@@ -382,6 +382,9 @@ class Envs:
     # Metrics
     SGLANG_ENABLE_METRICS_DEVICE_TIMER = EnvBool(False)
 
+    # Reasoning Grammar
+    SGLANG_TOKENIZER_THINK_END_TOKEN_ID = EnvInt(-1)
+
     # fmt: on
 
 
