@@ -116,7 +116,7 @@ def validate_input_length(
             # )
             # req.origin_input_ids = req.origin_input_ids[:max_req_input_len]
 
-            max_new_tokens = req.sampling_params.max_new_tokens
+            max_new_tokens = max(4096, req.sampling_params.max_new_tokens)
 
             # NOTE remove middle
             assert max_req_input_len > max_new_tokens

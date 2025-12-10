@@ -200,7 +200,9 @@ class NgramVerifyInput(SpecInput):
                             # ```
                             logger.error("Grammar rejected")
                             # req.grammar.rollback(0)
-                            self.accept_index[i, j + 1:] = -1
+                            # self.accept_index[i, j + 1:] = -1
+                            self.accept_index[i, j:] = -1
+                            req.output_ids.pop(-1)
                             break
                         is_accepting = is_accepted
             req.spec_verify_ct += 1
@@ -428,7 +430,8 @@ class NgramVerifyInput(SpecInput):
         if vocab_mask is not None:
             assert self.grammar is not None
             self.grammar.apply_vocab_mask(
-                logits=logits_output.next_token_logits, vocab_mask=vocab_mask
+                logits=logits_output.next_token_logits,
+                vocab_mask=vocab_mask,
             )
 
         # Sample tokens. Force greedy sampling on AMD
