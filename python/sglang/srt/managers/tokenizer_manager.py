@@ -640,7 +640,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         # FIXME: unify the length validation logic with the one in the scheduler.
         _max_req_len = self.context_len
 
-        max_new_tokens = obj.sampling_params.get("max_new_tokens", 4096)
+        max_new_tokens = max(4096, obj.sampling_params.get("max_new_tokens", 4096))
 
         input_token_num = len(input_ids) if input_ids is not None else 0
         input_token_num += self.reserve_input_token_num

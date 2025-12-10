@@ -292,6 +292,8 @@ def create_grammar_backend(
             "ReasonerGrammerBackend could not found any think token id for this model."
         )
 
+        tokenizer.think_end_id = inferred_think_token_id
+
         from sglang.srt.constrained.reasoner_grammar_backend import (
             ReasonerGrammarBackend,
         )
