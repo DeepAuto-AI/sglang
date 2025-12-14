@@ -1,8 +1,10 @@
 import abc
 import logging
+import math
 import threading
 from collections import defaultdict
 from functools import wraps
+import time
 from typing import Optional
 
 import psutil
@@ -52,6 +54,26 @@ def synchronized(func):
     return wrapper
 
 
+import numba
+import numpy as np
+import os
+
+
+# NOTE: i have no idea why parallel=True show bad throughput
+@numba.njit(parallel=False)
+def fill_zeros_(m: np.ndarray, n_thread: int):
+    assert m.ndim == 1
+    for ithread in numba.prange(n_thread):
+        chunk_size = math.ceil(m.shape[0] / n_thread)
+        block_size = 4096
+        for i in range(
+            chunk_size * ithread,
+            min(chunk_size * ithread + chunk_size, m.shape[0]),
+            block_size,
+        ):
+            m[i: i+block_size] = 0
+    return m
+
 def alloc_with_host_register(
     dims,
     dtype: torch.dtype,
@@ -63,6 +85,7 @@ def alloc_with_host_register(
     CudaHostRegister only applies when pin_memory=True.
     """
     buffer = torch.empty(dims, dtype=dtype, device=device)
+    fill_zeros_(buffer.view(-1).numpy(), os.cpu_count())
     if pin_memory:
         torch.cuda.cudart().cudaHostRegister(
             buffer.data_ptr(), buffer.numel() * buffer.element_size(), 0

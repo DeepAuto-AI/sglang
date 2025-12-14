@@ -625,6 +625,30 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             input_ids, token_type_ids = await self._tokenize_texts(
                 input_text, is_cross_encoder_request
             )
+        
+        if self.server_args.allow_auto_truncate:
+            max_new_tokens = max(
+                8192,
+                obj.sampling_params.get("max_new_tokens", 0) * 2
+            )
+            org_len = len(input_ids)
+
+            prompt_len = self.context_len - max_new_tokens
+
+            if org_len > prompt_len:
+                end_prefix = prompt_len // 2
+                start_postfix = len(input_ids) - prompt_len // 2
+                step_size = max_new_tokens // 2
+                start_postfix = start_postfix // step_size * step_size
+                assert start_postfix >= end_prefix, f"{start_postfix} >= {end_prefix}"
+                input_ids = (
+                    input_ids[:end_prefix]
+                    + input_ids[start_postfix:]
+                )
+                logger.info(
+                    f"Truncate tokenizing request: {org_len} --> {len(input_ids)}, "
+                    f"inp[:{end_prefix}] + inp[{start_postfix}:] = {len(input_ids)}"
+                )
 
         if self.mm_processor and obj.contains_mm_input():
             if obj.image_data is not None and not isinstance(obj.image_data, list):
@@ -681,8 +705,6 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
         # FIXME: unify the length validation logic with the one in the scheduler.
         _max_req_len = self.context_len
 
-        max_new_tokens = max(4096, obj.sampling_params.get("max_new_tokens", 4096))
-
         input_token_num = len(input_ids) if input_ids is not None else 0
         input_token_num += self.reserve_input_token_num
         if input_token_num >= self.context_len:
@@ -692,13 +714,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                     f"model's context length ({self.context_len} tokens). "
                     "Truncating the input."
                 )
-
-                # NOTE remove middle
-                assert _max_req_len > max_new_tokens
-                prompt_len = _max_req_len - max_new_tokens
-                assert prompt_len >= 2
-                input_ids = input_ids[:prompt_len // 2] + input_ids[-(prompt_len // 2):]
-
+                del input_ids[_max_req_len:]
                 input_token_num = len(input_ids)
             else:
                 raise ValueError(
@@ -713,6 +729,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
             )
 
         # Check total tokens (input + max_new_tokens)
+        max_new_tokens = obj.sampling_params.get("max_new_tokens")
         if (
             max_new_tokens is not None
             and (max_new_tokens + input_token_num) >= _max_req_len
