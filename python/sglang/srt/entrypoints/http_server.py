@@ -26,6 +26,7 @@ import threading
 import time
 from contextlib import asynccontextmanager
 from http import HTTPStatus
+import traceback
 from typing import (
     Any,
     AsyncGenerator,
@@ -411,6 +412,12 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
             "code": HTTPStatus.BAD_REQUEST.value,
         }
         return ORJSONResponse(status_code=400, content={"error": nested_error})
+    
+    message += traceback.print_exception(
+        type(exc),
+        exc,
+        exc.__traceback__,
+    )
 
     err = ErrorResponse(
         message=message,

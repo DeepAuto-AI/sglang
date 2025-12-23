@@ -201,7 +201,7 @@ pub struct ChatCompletionRequest {
 
     /// How many chat completion choices to generate for each input message
     #[serde(skip_serializing_if = "Option::is_none")]
-    #[validate(range(min = 1, max = 10))]
+    #[validate(range(min = 1, max = 32))]
     pub n: Option<u32>,
 
     /// Whether to enable parallel function calling during tool use

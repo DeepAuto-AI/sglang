@@ -639,7 +639,7 @@ class TokenizerManager(TokenizerCommunicatorMixin, TokenizerManagerMultiItemMixi
                 end_prefix = prompt_len // 2
                 start_postfix = len(input_ids) - prompt_len // 2
                 step_size = max_new_tokens // 2
-                start_postfix = start_postfix // step_size * step_size
+                start_postfix = max(end_prefix, start_postfix // step_size * step_size)
                 assert start_postfix >= end_prefix, f"{start_postfix} >= {end_prefix}"
                 input_ids = (
                     input_ids[:end_prefix]

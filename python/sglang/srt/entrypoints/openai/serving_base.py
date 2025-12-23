@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import time
+import traceback
 import uuid
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, List, Optional, Tuple, Union
@@ -125,8 +126,10 @@ class OpenAIServingBase(ABC):
                 message=e.detail, err_type=str(e.status_code), status_code=e.status_code
             )
         except ValueError as e:
+            message = traceback.format_exc()
+            print(message)
             return self.create_error_response(
-                message=str(e),
+                message=message + "\n\n" + str(e),
                 err_type="BadRequest",
                 status_code=400,
             )
